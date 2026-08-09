@@ -39,7 +39,7 @@ pub fn validate(format: Format, path: &Path, content: &[u8]) -> Result<(), Strin
                 Ok(out) => Err(format!(
                     "{} syntax check: {}",
                     binary,
-                    String::from_utf8_lossy(&out.stderr).trim().to_string()
+                    String::from_utf8_lossy(&out.stderr).trim()
                 )),
                 Err(e) => Err(format!(
                     "{} is not installed; syntax check unavailable: {e}",

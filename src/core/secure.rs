@@ -148,7 +148,6 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::MetadataExt;
 
     #[test]
     fn open_regular_refuses_directory() {

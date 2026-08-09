@@ -40,12 +40,15 @@ config-editor version
 
 确保 `~/.local/bin` 已加入 `PATH`。
 
-### Go install
+### 从源码构建 / Build from source
 
-需要 Go 1.25：
+需要 Rust 1.97+：
 
 ```bash
-go install github.com/gutskugou/config-editor/cmd/config-editor@v0.1.0
+git clone https://github.com/gutskugou/config-editor.git
+cd config-editor
+cargo build --release
+install -Dm755 target/release/config-editor ~/.local/bin/config-editor
 ```
 
 ## 使用 / Usage
@@ -98,15 +101,15 @@ config-editor
 
 ## 开发 / Development
 
-支持目标为 Ubuntu 24.04 和 WSL，构建需要 Go 1.25：
+支持目标为 Ubuntu 24.04 和 WSL，构建需要 Rust 1.97+：
 
 ```bash
 git clone https://github.com/gutskugou/config-editor.git
 cd config-editor
-go test ./...
-go test -race ./...
-go vet ./...
-go build -o config-editor ./cmd/config-editor
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo build --release
+./target/release/config-editor
 ```
 
 更多信息：

@@ -185,7 +185,7 @@ mod tests {
         std::fs::write(&cfg, b"[user]\nname = Ada\n").unwrap();
         let m = manager(&home, &state);
         let change = m.prepare(&cfg, Format::Git).unwrap();
-        assert!(change.stage.starts_with(&state.join("config-editor/edit")));
+        assert!(change.stage.starts_with(state.join("config-editor/edit")));
         assert_eq!(
             std::fs::read(&change.stage).unwrap(),
             b"[user]\nname = Ada\n"

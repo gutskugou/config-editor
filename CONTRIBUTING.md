@@ -4,17 +4,15 @@ Thanks for helping improve Config Editor.
 
 ## Development
 
-Config Editor requires Go 1.25 and targets Linux/WSL.
+Config Editor requires Rust 1.97+ and targets Linux/WSL.
 
 ```bash
-go mod download
-go test ./...
-go test -race ./...
-go vet ./...
-go build ./cmd/config-editor
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo build --release
 ```
 
-Run `gofmt` on changed Go files. Keep adapters inside the current user-configuration safety boundary and add tests for discovery, parsing, redaction and write behavior.
+Run `cargo fmt` on changed Rust files and keep `cargo clippy -- -D warnings` free of warnings. Keep adapters inside the current user-configuration safety boundary and add tests for discovery, parsing, redaction and write behavior.
 
 ## Pull requests
 
