@@ -155,7 +155,9 @@ impl App {
             }
             KeyCode::Char('s') => self.start_structured(),
             KeyCode::Char('e') => {
-                let _ = self.start_editor();
+                if let Err(e) = self.start_editor() {
+                    self.status = format!("! {e}");
+                }
             }
             KeyCode::Char('r') => self.start_restore(),
             _ => {}
@@ -328,6 +330,24 @@ impl App {
 
     fn handle_confirm(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(change) = self.pending.take() {
+                    let _ = self.manager.discard(&change);
+                }
+                self.prompt = Prompt::None;
+                self.diff.clear();
+                self.diff_offset = 0;
+                self.quit = true;
+            }
+            KeyCode::Char('q') => {
+                if let Some(change) = self.pending.take() {
+                    let _ = self.manager.discard(&change);
+                }
+                self.prompt = Prompt::None;
+                self.diff.clear();
+                self.diff_offset = 0;
+                self.quit = true;
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.diff_offset = self.diff_offset.saturating_sub(1);
             }
@@ -379,6 +399,12 @@ impl App {
 
     fn handle_text_input(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(change) = self.pending.take() {
+                    let _ = self.manager.discard(&change);
+                }
+                self.quit = true;
+            }
             KeyCode::Esc => {
                 self.prompt = Prompt::None;
                 self.input.clear();
@@ -447,7 +473,13 @@ impl App {
             .filter(|s| !s.is_empty())
             .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
             .unwrap_or_else(|| "vi".to_string());
-        let parts = shell_words::split(&editor).map_err(|e| e.to_string())?;
+        let parts = match shell_words::split(&editor) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = self.manager.discard(&change);
+                return Err(e.to_string());
+            }
+        };
         if parts.is_empty() {
             let _ = self.manager.discard(&change);
             return Err("editor command is empty".into());
@@ -472,7 +504,13 @@ impl App {
             }
             Ok(_) => {}
         }
-        let after = std::fs::read(&change.stage).map_err(|e| e.to_string())?;
+        let after = match std::fs::read(&change.stage) {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = self.manager.discard(&change);
+                return Err(e.to_string());
+            }
+        };
         let before = std::fs::read(&change.target).unwrap_or_default();
         if after == before {
             let _ = self.manager.discard(&change);
@@ -864,5 +902,102 @@ mod tests {
         );
         app.handle_key(key(KeyCode::Char('q')));
         assert!(app.quit);
+    }
+
+    #[test]
+    fn ctrl_c_in_search_quits() {
+        let mut app = App::new(
+            sample_apps(),
+            core::Manager::default(),
+            i18n::Catalog { chinese: false },
+        );
+        app.handle_key(key(KeyCode::Char('/')));
+        assert_eq!(app.prompt, Prompt::Search);
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn q_is_text_input_inside_search() {
+        let mut app = App::new(
+            sample_apps(),
+            core::Manager::default(),
+            i18n::Catalog { chinese: false },
+        );
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(!app.quit);
+        assert_eq!(app.input, "q");
+    }
+
+    fn temp_env() -> (tempfile::TempDir, core::Manager, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let cfg = home.join(".gitconfig");
+        std::fs::write(&cfg, b"[user]\nname = Ada\n").unwrap();
+        let manager = core::Manager {
+            home: home.clone(),
+            config_root: dir.path().join("config"),
+            state_root: dir.path().join("state"),
+        };
+        (dir, manager, cfg)
+    }
+
+    fn app_with_source(manager: core::Manager, cfg: &std::path::Path) -> App {
+        let mut app = App::new(sample_apps(), manager, i18n::Catalog { chinese: false });
+        app.apps[0].sources[0].path = cfg.to_str().unwrap().into();
+        app.apps[0].sources[0].resolved = Some(cfg.to_str().unwrap().into());
+        app
+    }
+
+    #[test]
+    fn ctrl_c_in_confirm_quits_and_discards_stage() {
+        let (dir, manager, cfg) = temp_env();
+        let mut app = app_with_source(manager, &cfg);
+        let change = app.manager.prepare(&cfg, Format::Git).unwrap();
+        let stage = change.stage.clone();
+        app.pending = Some(change);
+        app.prompt = Prompt::Confirm;
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.quit);
+        assert!(app.pending.is_none());
+        assert!(
+            !stage.exists(),
+            "stage must be discarded when quitting from confirm"
+        );
+        let edit_dir = dir.path().join("state/config-editor/edit");
+        let leftovers: Vec<_> = std::fs::read_dir(&edit_dir)
+            .map(|rd| rd.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        assert!(leftovers.is_empty(), "edit directory must be empty");
+    }
+
+    #[test]
+    fn editor_parse_error_discards_stage_and_reports_status() {
+        let (dir, manager, cfg) = temp_env();
+        let mut app = app_with_source(manager, &cfg);
+        let saved_visual = std::env::var_os("VISUAL");
+        let saved_editor = std::env::var_os("EDITOR");
+        std::env::remove_var("VISUAL");
+        std::env::set_var("EDITOR", "'");
+        app.handle_key(key(KeyCode::Char('e')));
+        match saved_visual {
+            Some(v) => std::env::set_var("VISUAL", v),
+            None => std::env::remove_var("VISUAL"),
+        }
+        match saved_editor {
+            Some(v) => std::env::set_var("EDITOR", v),
+            None => std::env::remove_var("EDITOR"),
+        }
+        assert!(app.status.starts_with('!'), "status must report the error");
+        let edit_dir = dir.path().join("state/config-editor/edit");
+        let leftovers: Vec<_> = std::fs::read_dir(&edit_dir)
+            .map(|rd| rd.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "staged file must be discarded on editor error"
+        );
     }
 }
