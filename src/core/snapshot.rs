@@ -36,6 +36,7 @@ pub fn create_snapshot(
     );
     let dir = root.join(name);
     fs::create_dir(&dir).map_err(|e| e.to_string())?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     let complete = std::cell::Cell::new(false);
     let cleanup = || {
         if !complete.get() {
@@ -59,7 +60,12 @@ pub fn create_snapshot(
         hash: secure::digest(content),
     };
     let meta = serde_json::to_vec_pretty(&snapshot).map_err(|e| e.to_string())?;
-    fs::write(dir.join("metadata.json"), meta).map_err(|e| {
+    let meta_path = dir.join("metadata.json");
+    fs::write(&meta_path, meta).map_err(|e| {
+        cleanup();
+        e.to_string()
+    })?;
+    fs::set_permissions(&meta_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
         cleanup();
         e.to_string()
     })?;
@@ -117,6 +123,10 @@ mod tests {
         );
         let meta = std::fs::metadata(&snap.content_path).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let dir_meta = std::fs::metadata(&snap.path).unwrap();
+        assert_eq!(dir_meta.permissions().mode() & 0o777, 0o700);
+        let meta_meta = std::fs::metadata(snap.path.join("metadata.json")).unwrap();
+        assert_eq!(meta_meta.permissions().mode() & 0o777, 0o600);
     }
 
     #[test]

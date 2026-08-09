@@ -57,10 +57,7 @@ fn is_sensitive(key: &str, value: &str) -> bool {
     }
     let trimmed = value.trim().trim_matches(|c| c == '"' || c == '\'');
     match url::Url::parse(trimmed) {
-        Ok(parsed) => {
-            parsed.password().is_some()
-                || (!parsed.username().is_empty() && parsed.password().is_some())
-        }
+        Ok(parsed) => parsed.password().is_some(),
         Err(_) => false,
     }
 }
@@ -70,6 +67,9 @@ fn split_setting(format: Format, line: &str) -> Option<(String, String)> {
         let mut parts = line.split_whitespace();
         let key = parts.next()?;
         let value = parts.collect::<Vec<_>>().join(" ");
+        if value.is_empty() {
+            return None;
+        }
         return Some((key.to_string(), value));
     }
     if format == Format::Ini {
@@ -142,7 +142,7 @@ pub fn replace_setting(
     let prefix = line[..pos].trim_end();
     let mut new_value = value.to_string();
     if format == Format::Toml && is_quoted(line[pos + 1..].trim()) && !is_quoted(&new_value) {
-        new_value = format!("\"{}\"", value.replace('"', "\\\""));
+        new_value = format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
     }
     if matches!(format, Format::Properties | Format::Ini | Format::Git) {
         lines[setting.line - 1] = format!("{}={}", prefix, new_value);
@@ -250,6 +250,23 @@ mod tests {
     }
 
     #[test]
+    fn replace_toml_requotes_escapes_backslashes() {
+        let before = b"format = \"$all\"\n";
+        let setting = Setting {
+            key: "format".into(),
+            value: "\"$all\"".into(),
+            line: 1,
+            editable: true,
+            sensitive: false,
+        };
+        let after = String::from_utf8(
+            replace_setting(Format::Toml, before, &setting, r"C:\Users\ada").unwrap(),
+        )
+        .unwrap();
+        assert!(after.contains("\"C:\\\\Users\\\\ada\""));
+    }
+
+    #[test]
     fn replace_toml_keeps_bare_literals() {
         let before = b"scan_timeout = 5000\n";
         let setting = Setting {
@@ -266,6 +283,17 @@ mod tests {
     }
 
     #[test]
+    fn ssh_bare_token_lines_produce_no_settings() {
+        let bare_host = parse_settings(Format::Ssh, b"Host example\n  StrictHostKeyChecking\n");
+        assert!(
+            bare_host.is_empty(),
+            "bare token inside Host block must be skipped"
+        );
+        let bare_line = parse_settings(Format::Ssh, b"Host\n");
+        assert!(bare_line.is_empty(), "Host with no value must be skipped");
+    }
+
+    #[test]
     fn replace_ssh_keeps_indent_and_key() {
         let before = b"Host example\n  User ada\n";
         let setting = Setting {
@@ -279,6 +307,16 @@ mod tests {
             String::from_utf8(replace_setting(Format::Ssh, before, &setting, "grace").unwrap())
                 .unwrap();
         assert!(after.contains("  User grace"));
+    }
+
+    #[test]
+    fn url_username_without_password_is_not_sensitive() {
+        let s = parse_settings(
+            Format::Ini,
+            b"[global]\nindex-url=https://user@example.test/simple\n",
+        );
+        assert_eq!(s.len(), 1);
+        assert!(!s[0].sensitive && s[0].editable);
     }
 
     #[test]

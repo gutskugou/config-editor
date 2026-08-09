@@ -267,8 +267,8 @@ impl App {
                 return;
             }
         };
-        // replace_setting 需要原始内容；stage 在 Prepare 时已复制原内容，直接读 target 等价且简单
-        let original = std::fs::read(&change.target).unwrap_or_default();
+        // 以 prepare 时暂存的副本为基准做替换与 diff，避免目标文件在准备期间被修改
+        let original = std::fs::read(&change.stage).unwrap_or_default();
         let content = match replace_setting(source.format, &original, setting, &self.input) {
             Ok(c) => c,
             Err(e) => {
@@ -948,7 +948,33 @@ mod tests {
         let mut app = App::new(sample_apps(), manager, i18n::Catalog { chinese: false });
         app.apps[0].sources[0].path = cfg.to_str().unwrap().into();
         app.apps[0].sources[0].resolved = Some(cfg.to_str().unwrap().into());
+        app.apps[0].sources[0].settings[0].line = 2;
         app
+    }
+
+    #[test]
+    fn structured_edit_stages_replacement_and_builds_diff() {
+        let (_dir, manager, cfg) = temp_env();
+        let mut app = app_with_source(manager, &cfg);
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(app.prompt, Prompt::Value);
+        assert_eq!(app.input, "Ada");
+        for _ in 0..3 {
+            app.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "Grace".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.prompt, Prompt::Confirm);
+        let change = app.pending.as_ref().expect("pending change");
+        let stage = change.stage.clone();
+        assert_eq!(std::fs::read(&stage).unwrap(), b"[user]\nname=Grace\n");
+        assert!(app.diff.contains("name = Ada"));
+        assert!(app.diff.contains("name=Grace"));
+        let _ = app.manager.discard(&app.pending.take().unwrap());
+        assert!(!stage.exists());
     }
 
     #[test]
