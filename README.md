@@ -12,7 +12,7 @@ Config Editor is a safety layer for personal Linux configuration files. It disco
 
 ## 功能 / Features
 
-- 发现 12 类配置：Git、SSH client、Bash、Zsh、Fish、tmux、Vim、Neovim、VS Code Remote、Starship、npm 和 pip。
+- 发现 12 类配置：Git、SSH client、Bash、Zsh、Fish、tmux、Vim、Neovim、VS Code、Starship、npm 和 pip。
 - Git、SSH、Starship、npm 和 pip 支持有限的逐行结构化编辑。
 - 所有已存在的配置文件都可以通过 `$VISUAL`/`$EDITOR` 编辑私有暂存副本。
 - Bash、Zsh、Fish、JSONC 和 TOML 在适用时执行语法检查。

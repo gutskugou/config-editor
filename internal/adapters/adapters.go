@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gutskugou/config-editor/internal/domain"
@@ -44,7 +45,7 @@ func definitions() []definition {
 		{"tmux", "tmux", "tmux", "Terminal multiplexer preferences", "终端复用器偏好", "tmux", []domain.Capability{domain.CapabilityDiscover, domain.CapabilityRaw}, []candidate{c("tmux", func(p paths.Paths) string { return filepath.Join(p.Home, ".tmux.conf") }), c("tmux", func(p paths.Paths) string { return filepath.Join(p.Config, "tmux", "tmux.conf") })}},
 		{"vim", "Vim", "Vim", "Editor preferences and plugins", "编辑器偏好和插件", "vim", []domain.Capability{domain.CapabilityDiscover, domain.CapabilityRaw}, []candidate{c("vim", func(p paths.Paths) string { return filepath.Join(p.Home, ".vimrc") }), c("vim", func(p paths.Paths) string { return filepath.Join(p.Config, "vim", "vimrc") })}},
 		{"nvim", "Neovim", "Neovim", "Editor preferences and plugins", "编辑器偏好和插件", "nvim", []domain.Capability{domain.CapabilityDiscover, domain.CapabilityRaw}, []candidate{c("lua", func(p paths.Paths) string { return filepath.Join(p.Config, "nvim", "init.lua") }), c("vim", func(p paths.Paths) string { return filepath.Join(p.Config, "nvim", "init.vim") })}},
-		{"vscode", "VS Code Remote", "VS Code 远程", "Remote user settings", "远程用户设置", "code", []domain.Capability{domain.CapabilityDiscover, domain.CapabilitySyntax, domain.CapabilityRaw}, []candidate{c("jsonc", func(p paths.Paths) string {
+		{"vscode", "VS Code", "VS Code", "User settings (local and Remote)", "用户设置（本地与远程）", "code", []domain.Capability{domain.CapabilityDiscover, domain.CapabilitySyntax, domain.CapabilityRaw}, []candidate{c("jsonc", func(p paths.Paths) string {
 			return filepath.Join(p.Home, ".vscode-server", "data", "Machine", "settings.json")
 		}), c("jsonc", func(p paths.Paths) string { return filepath.Join(p.Config, "Code", "User", "settings.json") })}},
 		{"starship", "Starship", "Starship", "Cross-shell prompt settings", "跨 Shell 提示符设置", "starship", append(structured, domain.CapabilitySyntax), []candidate{c("toml", func(p paths.Paths) string { return filepath.Join(p.Config, "starship.toml") })}},
@@ -211,16 +212,24 @@ func ReplaceSetting(format string, content []byte, setting domain.Setting, value
 			return nil, errors.New("setting is not a key/value line")
 		}
 		prefix := strings.TrimRight(line[:pos], " \t")
-		space := " "
-		if pos+1 < len(line) && line[pos+1] != ' ' {
-			space = ""
+		if format == "toml" && isQuoted(strings.TrimSpace(line[pos+1:])) && !isQuoted(value) {
+			value = strconv.Quote(value)
 		}
-		lines[setting.Line-1] = prefix + " =" + space + value
 		if format == "properties" || format == "ini" || format == "git" {
 			lines[setting.Line-1] = prefix + "=" + value
+		} else {
+			space := " "
+			if pos+1 < len(line) && line[pos+1] != ' ' {
+				space = ""
+			}
+			lines[setting.Line-1] = prefix + " =" + space + value
 		}
 	}
 	return []byte(strings.Join(lines, "\n")), nil
+}
+
+func isQuoted(value string) bool {
+	return strings.HasPrefix(value, `"`) || strings.HasPrefix(value, "'")
 }
 
 func Validate(format, path string, content []byte) error {

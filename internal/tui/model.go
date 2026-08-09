@@ -579,7 +579,11 @@ func (m *Model) refresh() {
 			if !source.Exists {
 				continue
 			}
-			if content, err := os.ReadFile(source.Path); err == nil {
+			path := source.Path
+			if source.Resolved != "" {
+				path = source.Resolved
+			}
+			if content, err := os.ReadFile(path); err == nil {
 				source.Settings = adapters.ParseSettings(source.Format, content)
 			}
 		}

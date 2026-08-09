@@ -118,6 +118,30 @@ func TestReplaceBareGitBoolean(t *testing.T) {
 	}
 }
 
+func TestReplaceTOMLReQuotesStringValue(t *testing.T) {
+	before := []byte("format = \"$all\"\n")
+	setting := domain.Setting{Key: "format", Value: `"$all"`, Line: 1, Editable: true}
+	after, err := ReplaceSetting("toml", before, setting, "$all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(after), `format = "$all"`) {
+		t.Fatalf("toml string value lost quoting:\n%s", after)
+	}
+}
+
+func TestReplaceTOMLKeepsBareLiteral(t *testing.T) {
+	before := []byte("scan_timeout = 5000\n")
+	setting := domain.Setting{Key: "scan_timeout", Value: "5000", Line: 1, Editable: true}
+	after, err := ReplaceSetting("toml", before, setting, "6000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(after), "scan_timeout = 6000") {
+		t.Fatalf("bare literal changed unexpectedly:\n%s", after)
+	}
+}
+
 func TestValidateJSONC(t *testing.T) {
 	if err := Validate("jsonc", "settings.json", []byte("{ // comment\n \"x\": true,\n}")); err != nil {
 		t.Fatal(err)

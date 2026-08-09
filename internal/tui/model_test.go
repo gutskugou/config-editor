@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -65,6 +67,28 @@ func TestUnicodeInputBackspaceAndPaste(t *testing.T) {
 	model = press(model, tea.Key{Text: "配置"})
 	if model.input != "中配置" {
 		t.Fatalf("multi-rune paste was not accepted: %q", model.input)
+	}
+}
+
+func TestRefreshReadsThroughResolvedTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("[user]\nname = \"Alice\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	apps := []domain.Application{{ID: "git", Capabilities: []domain.Capability{domain.CapabilityStructured}, Sources: []domain.Source{{Path: link, Resolved: target, Exists: true, Format: "git"}}}}
+	model := New(apps, core.Manager{}, i18n.Catalog{})
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	model.refresh()
+	settings := model.apps[0].Sources[0].Settings
+	if len(settings) != 1 || settings[0].Key != "user.name" || settings[0].Value != `"Alice"` {
+		t.Fatalf("refresh did not read through resolved target: %#v", settings)
 	}
 }
 
