@@ -14,6 +14,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(sed -n 's/^version = "\([0-9][^"]*\)"$/\1/p' Cargo.toml)"
+          if [ -z "${CARGO_VERSION}" ]; then
+            echo "::error::cannot read version from Cargo.toml"
+            exit 1
+          fi
+          if [ "${TAG}" != "${CARGO_VERSION}" ]; then
+            echo "::error::tag '${GITHUB_REF_NAME}' does not match Cargo.toml version '${CARGO_VERSION}'"
+            exit 1
+          fi
+          echo "tag ${TAG} matches Cargo.toml version ${CARGO_VERSION}"
       - name: Install cross-compiler
         run: |
           sudo apt-get update
@@ -31,13 +45,26 @@ jobs:
         env:
           CONFIG_EDITOR_COMMIT: ${{ github.sha }}
           CONFIG_EDITOR_DATE: ${{ github.event.head_commit.timestamp }}
+      # Linux 兼容基线：产物在 ubuntu-24.04（glibc 2.39）上构建，
+      # 面向 Ubuntu 24.04+ / glibc 2.39+ 的发行版与 WSL；
+      # 更旧的发行版请从源码构建（见 README「平台支持」）。
       - name: Package
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist
-          tar -czf "dist/config-editor_${VERSION}_linux_amd64.tar.gz" -C target/release config-editor
-          tar -czf "dist/config-editor_${VERSION}_linux_arm64.tar.gz" -C target/aarch64-unknown-linux-gnu/release config-editor
+          for arch in amd64 arm64; do
+            stage="dist/stage-${arch}"
+            mkdir -p "${stage}"
+            if [ "${arch}" = "amd64" ]; then
+              cp target/release/config-editor "${stage}/"
+            else
+              cp target/aarch64-unknown-linux-gnu/release/config-editor "${stage}/"
+            fi
+            cp README.md LICENSE CHANGELOG.md "${stage}/"
+            tar -czf "dist/config-editor_${VERSION}_linux_${arch}.tar.gz" -C "${stage}" .
+            rm -rf "${stage}"
+          done
           cd dist
           sha256sum *.tar.gz > checksums.txt
       - name: Release
