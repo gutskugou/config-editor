@@ -13,21 +13,28 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.25.x'
-          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
       - name: Test
-        run: go test ./...
-      - name: Vet
-        run: go vet ./...
+        run: cargo test
+      - name: Build amd64
+        run: cargo build --release
+      - name: Build arm64
+        run: cargo build --release --target aarch64-unknown-linux-gnu
+      - name: Package
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          tar -czf "dist/config-editor_${VERSION}_linux_amd64.tar.gz" -C target/release config-editor
+          tar -czf "dist/config-editor_${VERSION}_linux_arm64.tar.gz" -C target/aarch64-unknown-linux-gnu/release config-editor
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
       - name: Release
-        uses: goreleaser/goreleaser-action@v6
+        uses: softprops/action-gh-release@v2
         with:
-          distribution: goreleaser
-          version: '~> v2'
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: dist/*

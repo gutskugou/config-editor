@@ -6,6 +6,10 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- 使用 Rust 完全重写（v0.2.0），功能与 v0.1.0 对齐；TUI 基于 ratatui。
+
 ## [0.1.0] - 2026-08-09
 
 ### Added
