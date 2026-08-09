@@ -4,11 +4,11 @@ All notable changes to Config Editor are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-10
 
 ### Changed
 
-- 使用 Rust 完全重写（v0.2.0），功能与 v0.1.0 对齐；TUI 基于 ratatui。
+- 使用 Rust 完全重写，功能与 v0.1.0 对齐；TUI 基于 ratatui。
 
 ## [0.1.0] - 2026-08-09
 
@@ -28,5 +28,5 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Reject symlink swaps, multiple hard links, concurrent replacements and corrupted snapshots.
 - Redact likely credentials from structured output.
 
-[Unreleased]: https://github.com/gutskugou/config-editor/compare/v0.1.0...HEAD
+[0.2.0]: https://github.com/gutskugou/config-editor/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/gutskugou/config-editor/releases/tag/v0.1.0

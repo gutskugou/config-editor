@@ -8,7 +8,7 @@
 
 Config Editor is a safety layer for personal Linux configuration files. It discovers familiar developer tools and turns risky direct edits into staged, reviewable, validated and recoverable changes.
 
-> **MVP status:** v0.1.0 只管理当前用户已有的配置文件，不管理 `/etc`、服务、软件包、远程机器或 PowerShell `$PROFILE`。
+> **MVP status:** v0.2.0 只管理当前用户已有的配置文件，不管理 `/etc`、服务、软件包、远程机器或 PowerShell `$PROFILE`。
 
 ## 功能 / Features
 
@@ -28,7 +28,7 @@ Config Editor is a safety layer for personal Linux configuration files. It disco
 从 [Releases](https://github.com/gutskugou/config-editor/releases) 下载与你的 Linux 架构对应的压缩包：
 
 ```bash
-VERSION=0.1.0
+VERSION=0.2.0
 ARCH=amd64 # arm64 is also available
 curl -LO "https://github.com/gutskugou/config-editor/releases/download/v${VERSION}/config-editor_${VERSION}_linux_${ARCH}.tar.gz"
 curl -LO "https://github.com/gutskugou/config-editor/releases/download/v${VERSION}/checksums.txt"
@@ -121,7 +121,7 @@ cargo build --release
 
 Config Editor targets personal Linux and WSL environments. It discovers conventional user-level configuration files, exposes a small set of non-sensitive line-oriented settings, and routes every write through staging, review, validation, snapshotting and atomic replacement.
 
-The v0.1.0 release intentionally does not manage system configuration, privilege escalation, services, package installation, remote machines or native Windows profiles. See the sections above for installation, commands, key bindings and safety details.
+The v0.2.0 release intentionally does not manage system configuration, privilege escalation, services, package installation, remote machines or native Windows profiles. See the sections above for installation, commands, key bindings and safety details.
 
 ## License
 
