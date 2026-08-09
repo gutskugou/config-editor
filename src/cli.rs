@@ -7,8 +7,8 @@ pub fn version_string() -> String {
     format!(
         "config-editor {} (commit {}, built {})",
         env!("CARGO_PKG_VERSION"),
-        "unknown",
-        "unknown"
+        env!("CONFIG_EDITOR_COMMIT"),
+        env!("CONFIG_EDITOR_DATE")
     )
 }
 
