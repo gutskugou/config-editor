@@ -111,8 +111,6 @@ go build -o config-editor ./cmd/config-editor
 
 更多信息：
 
-- [当前 TUI MVP 设计](docs/tui-mvp-design.md)
-- [早期 systemd 配置研究](docs/research-system-config.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)
 

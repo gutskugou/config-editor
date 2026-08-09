@@ -1,4 +1,5 @@
 /config-editor
 /dist/
+/docs/
 *.test
 coverage.out
