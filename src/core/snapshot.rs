@@ -75,7 +75,7 @@ pub fn create_snapshot(
 
 pub fn latest_snapshot(state_root: &Path, original_path: &str) -> Result<Snapshot, String> {
     let root = snapshots_root(state_root);
-    let mut latest: Option<Snapshot> = None;
+    let mut latest: Option<(String, Snapshot)> = None;
     for entry in fs::read_dir(&root).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -92,15 +92,16 @@ pub fn latest_snapshot(state_root: &Path, original_path: &str) -> Result<Snapsho
         if candidate.original_path != original_path {
             continue;
         }
-        if latest
-            .as_ref()
-            .map(|l| candidate.created_at > l.created_at)
-            .unwrap_or(true)
-        {
-            latest = Some(candidate);
+        // 目录名含纳秒时间戳（%Y%m%dT%H%M%S%.9fZ），字典序即时间序；
+        // created_at 只有秒精度，同秒快照无法靠它区分
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if latest.as_ref().map(|(n, _)| name > *n).unwrap_or(true) {
+            latest = Some((name, candidate));
         }
     }
-    latest.ok_or_else(|| "no snapshot found for this file".to_string())
+    latest
+        .map(|(_, snapshot)| snapshot)
+        .ok_or_else(|| "no snapshot found for this file".to_string())
 }
 
 #[cfg(test)]
@@ -139,6 +140,23 @@ mod tests {
         let latest = latest_snapshot(state.path(), "/a").unwrap();
         assert_eq!(latest.hash, newer.hash);
         assert_eq!(std::fs::read(latest.content_path).unwrap(), b"two");
+    }
+
+    #[test]
+    fn latest_within_same_second_picks_newest_by_directory_name() {
+        let state = tempfile::tempdir().unwrap();
+        // 同一秒内连续创建多个快照：created_at（秒精度）相同，
+        // 必须按纳秒精度的目录名选取真正最新的那个
+        let mut last = create_snapshot(state.path(), "/a", b"v1").unwrap();
+        for content in [b"v2".as_slice(), b"v3", b"v4"] {
+            last = create_snapshot(state.path(), "/a", content).unwrap();
+        }
+        let latest = latest_snapshot(state.path(), "/a").unwrap();
+        assert_eq!(
+            latest.hash, last.hash,
+            "同秒快照必须按目录名（纳秒时间戳）取最新"
+        );
+        assert_eq!(std::fs::read(latest.content_path).unwrap(), b"v4");
     }
 
     #[test]
