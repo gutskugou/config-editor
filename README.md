@@ -76,7 +76,7 @@ TUI 快捷键：
 先进入 WSL shell，再运行 TUI，以确保终端输入正确传递：
 
 ```powershell
-wsl.exe --cd /home/gutskugou/config-editor
+wsl.exe --cd ~
 ```
 
 然后在 WSL 内运行：
