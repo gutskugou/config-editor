@@ -55,9 +55,7 @@ impl Manager {
             .map_err(|e| e.to_string())?;
         stage
             .as_file()
-            .set_permissions(fs::Permissions::from_mode(
-                meta.permissions().mode() & 0o777,
-            ))
+            .set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|e| e.to_string())?;
         stage.write_all(&before).map_err(|e| e.to_string())?;
         stage.as_file().sync_all().map_err(|e| e.to_string())?;
@@ -182,13 +180,24 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let state = dir.path().join("state");
         let cfg = home.join(".gitconfig");
+        // 原配置为 0644（普通配置文件的默认权限）
         std::fs::write(&cfg, b"[user]\nname = Ada\n").unwrap();
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o644)).unwrap();
         let m = manager(&home, &state);
         let change = m.prepare(&cfg, Format::Git).unwrap();
         assert!(change.stage.starts_with(state.join("config-editor/edit")));
         assert_eq!(
             std::fs::read(&change.stage).unwrap(),
             b"[user]\nname = Ada\n"
+        );
+        let stage_mode = std::fs::metadata(&change.stage)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            stage_mode, 0o600,
+            "暂存文件必须是 0600 私有权限，不继承原配置权限"
         );
     }
 
