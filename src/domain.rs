@@ -51,6 +51,8 @@ pub struct Setting {
     pub key: String,
     pub value: String,
     pub line: usize,
+    /// 同一完整 key 在文件中的出现序号，从 1 开始；用于同名键/重复 Host 的稳定定位
+    pub occ: u32,
     pub editable: bool,
     pub sensitive: bool,
 }
@@ -149,6 +151,7 @@ mod tests {
                     key: "user.name".into(),
                     value: "Ada".into(),
                     line: 1,
+                    occ: 1,
                     editable: true,
                     sensitive: false,
                 }],

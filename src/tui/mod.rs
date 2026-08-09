@@ -1,7 +1,7 @@
 use crate::core::{self, Manager};
 use crate::domain::{Application, Capability, Setting, Source};
 use crate::i18n::Catalog;
-use crate::parse::{parse_settings, replace_setting};
+use crate::parse::{parse_settings, relocate_setting, replace_setting};
 use core::diff::simple_diff;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -269,23 +269,35 @@ impl App {
         };
         // 以 prepare 时暂存的副本为基准做替换与 diff，避免目标文件在准备期间被修改
         let original = std::fs::read(&change.stage).unwrap_or_default();
-        // 扫描时保存的行号可能已过期（文件被外部修改过），按 key 在当前内容中重新定位；
-        // 多个同 key 匹配时取最接近旧行号的一个，贴近用户原意
-        let located = parse_settings(source.format, &original)
-            .into_iter()
-            .filter(|s| s.key == setting.key)
-            .min_by_key(|s| s.line.abs_diff(setting.line));
-        let Some(current) = located else {
-            let _ = self.manager.discard(&change);
-            self.prompt = Prompt::None;
-            self.status = self
-                .lang
-                .text(
-                    "Setting no longer present in file; re-scan and try again",
-                    "该设置已不在文件中；请重新扫描后重试",
-                )
-                .into();
-            return;
+        // 扫描时保存的行号可能已过期（文件被外部修改过），按稳定标识
+        // （key + 出现序号 + 原值）在当前内容中重新定位；歧义时拒绝并提示重新扫描
+        let located = relocate_setting(source.format, &original, setting);
+        let current = match located {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                let _ = self.manager.discard(&change);
+                self.prompt = Prompt::None;
+                self.status = self
+                    .lang
+                    .text(
+                        "Setting no longer present in file; re-scan and try again",
+                        "该设置已不在文件中；请重新扫描后重试",
+                    )
+                    .into();
+                return;
+            }
+            Err(_) => {
+                let _ = self.manager.discard(&change);
+                self.prompt = Prompt::None;
+                self.status = self
+                    .lang
+                    .text(
+                        "Ambiguous duplicate setting; re-scan and try again",
+                        "存在无法区分的同名设置；请重新扫描后重试",
+                    )
+                    .into();
+                return;
+            }
         };
         let content = match replace_setting(source.format, &original, &current, &self.input) {
             Ok(c) => c,
@@ -640,14 +652,33 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )));
             let details = self.detail_lines(app, width);
-            let available = area.height as usize;
-            let start = visible_start(self.setting_index, details.len(), available);
+            // 详情区高度必须扣除标题行、应用列表、空行与描述行占用的行数；
+            // 滚动位置用选中设置的实际显示行号，而非设置序号
+            let header = 1 + apps.len() + 2;
+            let available = area.height.saturating_sub(header as u16) as usize;
+            let start = visible_start(self.selected_detail_row(app), details.len(), available);
             let end = (start + available).min(details.len());
             for detail in &details[start..end] {
                 lines.push(Line::from(detail.clone()));
             }
         }
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    }
+
+    /// 选中设置在 detail_lines 中的实际显示行号（含各 source 的 [file]/[missing]
+    /// 与诊断行），而不是全局设置序号；用于滚动窗口计算。
+    fn selected_detail_row(&self, app: &Application) -> usize {
+        let mut row = 0;
+        let mut idx = self.setting_index;
+        for source in &app.sources {
+            let header = 1 + usize::from(source.diagnostic.is_some());
+            if idx < source.settings.len() {
+                return row + header + idx;
+            }
+            idx -= source.settings.len();
+            row += header + source.settings.len();
+        }
+        0
     }
 
     fn detail_lines(&self, app: &Application, width: usize) -> Vec<Span<'static>> {
@@ -846,6 +877,7 @@ mod tests {
                     key: "user.name".into(),
                     value: "Ada".into(),
                     line: 1,
+                    occ: 1,
                     editable: true,
                     sensitive: false,
                 }],
@@ -1073,6 +1105,86 @@ mod tests {
     }
 
     #[test]
+    fn structured_edit_targets_selected_duplicate_occurrence() {
+        let (dir, manager, cfg) = temp_env();
+        // 同名键两条：选中第二条（user.name, occ=2）并改值，第一条必须原样保留
+        std::fs::write(&cfg, b"[user]\nname = Ada\nname = Grace\n").unwrap();
+        let mut app = app_with_source(manager, &cfg);
+        app.apps[0].sources[0].settings = vec![
+            Setting {
+                key: "user.name".into(),
+                value: "Ada".into(),
+                line: 2,
+                occ: 1,
+                editable: true,
+                sensitive: false,
+            },
+            Setting {
+                key: "user.name".into(),
+                value: "Grace".into(),
+                line: 3,
+                occ: 2,
+                editable: true,
+                sensitive: false,
+            },
+        ];
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Char('j'))); // 移到第二条
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(app.input, "Grace");
+        for _ in 0..5 {
+            app.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "Rust".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.prompt, Prompt::Confirm, "duplicate must not abort edit");
+        let change = app.pending.as_ref().expect("pending change");
+        let text = String::from_utf8(std::fs::read(&change.stage).unwrap()).unwrap();
+        assert!(
+            text.contains("name = Ada"),
+            "第一条同名键不得被修改:\n{text}"
+        );
+        assert!(
+            text.contains("name=Rust"),
+            "选中的第二条必须被修改:\n{text}"
+        );
+        assert!(!text.contains("name=Grace"), "第二条已改为 Rust:\n{text}");
+        let _ = app.manager.discard(&app.pending.take().unwrap());
+        let _ = dir;
+    }
+
+    #[test]
+    fn structured_edit_rejects_ambiguous_duplicates() {
+        let (dir, manager, cfg) = temp_env();
+        // 扫描时第 3 条 user.name（值 Grace）被选中；外部改动后同名键仍有多条、
+        // 值 Grace 出现两次、occ 无法命中选中条 → 拒绝并要求重新扫描
+        std::fs::write(&cfg, b"[user]\nname = Grace\nname = Grace\nname = Ada\n").unwrap();
+        let mut app = app_with_source(manager, &cfg);
+        app.apps[0].sources[0].settings[0].occ = 3;
+        app.apps[0].sources[0].settings[0].line = 4;
+        app.apps[0].sources[0].settings[0].value = "Grace".into();
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(app.prompt, Prompt::Value, "编辑前不应被拒");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.prompt, Prompt::None, "歧义必须中止编辑");
+        assert!(
+            app.status.contains("re-scan"),
+            "必须提示重新扫描: {}",
+            app.status
+        );
+        assert!(app.pending.is_none(), "歧义时不得留下 pending 暂存");
+        let edit_dir = dir.path().join("state/config-editor/edit");
+        let leftovers: Vec<_> = std::fs::read_dir(&edit_dir)
+            .map(|rd| rd.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        assert!(leftovers.is_empty(), "暂存必须被丢弃");
+        let _ = dir;
+    }
+
+    #[test]
     fn ctrl_c_in_confirm_quits_and_discards_stage() {
         let (dir, manager, cfg) = temp_env();
         let mut app = app_with_source(manager, &cfg);
@@ -1119,6 +1231,99 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "staged file must be discarded on editor error"
+        );
+    }
+
+    #[test]
+    fn selected_detail_row_counts_source_headers_and_diagnostics() {
+        let mut app = App::new(
+            sample_apps(),
+            core::Manager::default(),
+            i18n::Catalog { chinese: false },
+        );
+        app.apps[0].sources[0].settings = vec![
+            Setting {
+                key: "k1".into(),
+                ..Default::default()
+            },
+            Setting {
+                key: "k2".into(),
+                ..Default::default()
+            },
+            Setting {
+                key: "k3".into(),
+                ..Default::default()
+            },
+        ];
+        app.setting_index = 0;
+        assert_eq!(app.selected_detail_row(&app.apps[0]), 1, "[file] 占 1 行");
+        app.setting_index = 2;
+        assert_eq!(app.selected_detail_row(&app.apps[0]), 3);
+        // 诊断行让后续设置行号 +1
+        app.apps[0].sources[0].diagnostic = Some("boom".into());
+        app.setting_index = 0;
+        assert_eq!(app.selected_detail_row(&app.apps[0]), 2);
+        app.setting_index = 1;
+        assert_eq!(app.selected_detail_row(&app.apps[0]), 3);
+        // 两个 source：行号跨过第一个 source 的 [file] + 设置行
+        let second = Source {
+            path: "/home/me/.gitconfig.extra".into(),
+            resolved: None,
+            exists: true,
+            format: Format::Git,
+            diagnostic: Some("x".into()),
+            settings: vec![Setting {
+                key: "k4".into(),
+                ..Default::default()
+            }],
+        };
+        app.apps[0].sources.push(second);
+        app.apps[0].sources[0].diagnostic = None;
+        app.apps[0].sources[0].settings = vec![Setting {
+            key: "k1".into(),
+            ..Default::default()
+        }];
+        app.setting_index = 1; // 第二个 source 的第一个设置
+        assert_eq!(
+            app.selected_detail_row(&app.apps[0]),
+            4,
+            "1([file]) + 1(k1) + 1([file]) + 1(诊断) = 4 行前缀"
+        );
+    }
+
+    #[test]
+    fn detail_viewport_keeps_bottom_setting_visible_on_small_terminals() {
+        // 30 个设置 + 标题/应用/描述 4 行头：detail 区仅 6 行时，
+        // 滚动视口必须包含选中的最后一个设置（当前实现按整块高度计算，底部被裁剪）
+        let mut app = App::new(
+            sample_apps(),
+            core::Manager::default(),
+            i18n::Catalog { chinese: false },
+        );
+        app.apps[0].sources[0].settings = (0..30)
+            .map(|i| Setting {
+                key: format!("user.k{i}"),
+                value: format!("v{i}"),
+                line: 1,
+                occ: 1,
+                editable: true,
+                sensitive: false,
+            })
+            .collect();
+        app.focus = Focus::Settings;
+        app.setting_index = 29;
+        let backend = ratatui::backend::TestBackend::new(80, 16);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            text.contains("user.k29"),
+            "选中的最后一个设置必须在视口内可见:\n{text}"
+        );
+        assert!(
+            text.contains("> user.k29"),
+            "选中标记必须与最后一个设置同行:\n{text}"
         );
     }
 }
