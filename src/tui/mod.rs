@@ -269,7 +269,25 @@ impl App {
         };
         // 以 prepare 时暂存的副本为基准做替换与 diff，避免目标文件在准备期间被修改
         let original = std::fs::read(&change.stage).unwrap_or_default();
-        let content = match replace_setting(source.format, &original, setting, &self.input) {
+        // 扫描时保存的行号可能已过期（文件被外部修改过），按 key 在当前内容中重新定位；
+        // 多个同 key 匹配时取最接近旧行号的一个，贴近用户原意
+        let located = parse_settings(source.format, &original)
+            .into_iter()
+            .filter(|s| s.key == setting.key)
+            .min_by_key(|s| s.line.abs_diff(setting.line));
+        let Some(current) = located else {
+            let _ = self.manager.discard(&change);
+            self.prompt = Prompt::None;
+            self.status = self
+                .lang
+                .text(
+                    "Setting no longer present in file; re-scan and try again",
+                    "该设置已不在文件中；请重新扫描后重试",
+                )
+                .into();
+            return;
+        };
+        let content = match replace_setting(source.format, &original, &current, &self.input) {
             Ok(c) => c,
             Err(e) => {
                 let _ = self.manager.discard(&change);
@@ -352,13 +370,19 @@ impl App {
                 self.diff_offset = self.diff_offset.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.diff_offset += 1;
+                self.diff_offset = self
+                    .diff_offset
+                    .saturating_add(1)
+                    .min(self.max_diff_offset());
             }
             KeyCode::PageUp => {
                 self.diff_offset = self.diff_offset.saturating_sub(self.diff_page_size());
             }
             KeyCode::PageDown => {
-                self.diff_offset += self.diff_page_size();
+                self.diff_offset = self
+                    .diff_offset
+                    .saturating_add(self.diff_page_size())
+                    .min(self.max_diff_offset());
             }
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 let pending = self.pending.take();
@@ -747,6 +771,14 @@ impl App {
     fn diff_page_size(&self) -> usize {
         self.height.saturating_sub(4).max(1) as usize
     }
+
+    fn diff_lines(&self) -> usize {
+        self.diff.trim_end_matches('\n').split('\n').count()
+    }
+
+    fn max_diff_offset(&self) -> usize {
+        self.diff_lines().saturating_sub(self.diff_page_size())
+    }
 }
 
 fn setting_count(app: &Application) -> usize {
@@ -975,6 +1007,69 @@ mod tests {
         assert!(app.diff.contains("name=Grace"));
         let _ = app.manager.discard(&app.pending.take().unwrap());
         assert!(!stage.exists());
+    }
+
+    #[test]
+    fn diff_scroll_clamps_at_bottom() {
+        let mut app = App::new(
+            sample_apps(),
+            core::Manager::default(),
+            i18n::Catalog { chinese: false },
+        );
+        let mut diff = String::new();
+        for i in 0..30 {
+            diff.push_str(&format!("+line {i}\n"));
+        }
+        app.prompt = Prompt::Confirm;
+        app.diff = diff;
+        app.height = 12;
+        let max = app.max_diff_offset();
+        assert!(max > 0);
+        // 远超底部的下滚：offset 必须被钳制到上限
+        for _ in 0..100 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        assert_eq!(app.diff_offset, max, "offset must clamp at max");
+        // 钳制后按一次 k 立即上移
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.diff_offset, max - 1);
+    }
+
+    #[test]
+    fn structured_edit_relocates_stale_line_number() {
+        let (dir, manager, cfg) = temp_env();
+        // 扫描之后、编辑之前，外部工具在 name 前插入了一行 email
+        std::fs::write(&cfg, b"[user]\nemail = ada@example.test\nname = Ada\n").unwrap();
+        let mut app = app_with_source(manager, &cfg);
+        // app 中保存的仍是扫描时的旧行号：user.name 在第 2 行
+        assert_eq!(app.apps[0].sources[0].settings[0].line, 2);
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Char('s')));
+        for _ in 0..3 {
+            app.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "Grace".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.prompt,
+            Prompt::Confirm,
+            "stale line must not abort edit"
+        );
+        let change = app.pending.as_ref().expect("pending change");
+        let text = String::from_utf8(std::fs::read(&change.stage).unwrap()).unwrap();
+        assert!(
+            text.contains("name=Grace"),
+            "user.name 行必须被修改（当前第 3 行）:\n{text}"
+        );
+        assert!(
+            text.contains("email = ada@example.test"),
+            "email 行（旧行号 2 指向它）不得被修改:\n{text}"
+        );
+        assert!(!text.contains("email = Grace"), "email 被错误修改:\n{text}");
+        let _ = app.manager.discard(&app.pending.take().unwrap());
+        let _ = dir;
     }
 
     #[test]
