@@ -14,9 +14,20 @@ pub fn validate(format: Format, path: &Path, content: &[u8]) -> Result<(), Strin
         }
         Format::Jsonc => {
             let text = std::str::from_utf8(content).map_err(|e| format!("not valid UTF-8: {e}"))?;
-            jsonc_parser::parse_to_value(text, &Default::default())
-                .map(|_| ())
-                .map_err(|e| format!("invalid JSON with comments: {e}"))
+            let options = jsonc_parser::ParseOptions {
+                allow_comments: true,
+                allow_trailing_commas: true,
+                allow_loose_object_property_names: false,
+                allow_missing_commas: false,
+                allow_single_quoted_strings: false,
+                allow_hexadecimal_numbers: false,
+                allow_unary_plus_numbers: false,
+            };
+            match jsonc_parser::parse_to_value(text, &options) {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err("invalid JSON with comments: empty or comment-only content".into()),
+                Err(e) => Err(format!("invalid JSON with comments: {e}")),
+            }
         }
         Format::Bash | Format::Zsh | Format::Fish => {
             let binary = format.as_str();
@@ -66,6 +77,23 @@ mod tests {
     #[test]
     fn generic_formats_pass() {
         assert!(validate(Format::Git, Path::new("x"), b"[user]\nname=x\n").is_ok());
+    }
+
+    #[test]
+    fn jsonc_rejects_missing_commas_like_go() {
+        assert!(validate(Format::Jsonc, Path::new("x"), b"{\"a\":1 \"b\":2}").is_err());
+    }
+
+    #[test]
+    fn jsonc_rejects_single_quotes_like_go() {
+        assert!(validate(Format::Jsonc, Path::new("x"), b"{'a': 1}").is_err());
+    }
+
+    #[test]
+    fn jsonc_rejects_empty_or_comment_only_content_like_go() {
+        assert!(validate(Format::Jsonc, Path::new("x"), b"").is_err());
+        assert!(validate(Format::Jsonc, Path::new("x"), b"   \n\t ").is_err());
+        assert!(validate(Format::Jsonc, Path::new("x"), b"// only a comment").is_err());
     }
 
     #[test]
