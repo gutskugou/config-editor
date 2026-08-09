@@ -1,0 +1,4 @@
+/config-editor
+/dist/
+*.test
+coverage.out

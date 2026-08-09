@@ -1,0 +1,37 @@
+version: 2
+
+project_name: config-editor
+
+builds:
+  - id: config-editor
+    main: ./cmd/config-editor
+    binary: config-editor
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - >-
+        -s -w
+        -X main.version={{ .Tag }}
+        -X main.commit={{ .Commit }}
+        -X main.date={{ .Date }}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
+
+release:
+  prerelease: auto
