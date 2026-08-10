@@ -920,6 +920,9 @@ mod tests {
     use crate::i18n;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    // 进程级环境变量 EDITOR/VISUAL 是共享全局；注入编辑器的测试必须串行执行
+    static EDITOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -965,12 +968,14 @@ mod tests {
     }
 
     #[test]
-    fn right_enters_settings_pane() {
+    fn right_traverses_sources_then_settings() {
         let mut app = App::new(
             sample_apps(),
             core::Manager::default(),
             i18n::Catalog { chinese: false },
         );
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.focus, Focus::Sources);
         app.handle_key(key(KeyCode::Right));
         assert_eq!(app.focus, Focus::Settings);
         assert_eq!(app.setting_index, 0);
@@ -1001,6 +1006,9 @@ mod tests {
             i18n::Catalog { chinese: false },
         );
         app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.focus, Focus::Sources);
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(app.focus, Focus::Apps);
     }
@@ -1073,6 +1081,25 @@ mod tests {
             !text.contains("user.first"),
             "设置区不得混入其他 source 的设置:\n{text}"
         );
+        let style = row_starting_with(&buffer, "> ").expect("选中 source 行必须以 '> ' 开头");
+        assert_eq!(style.fg, Some(Color::Green), "选中 source 行必须高亮为绿色");
+        assert!(
+            style.add_modifier.contains(Modifier::BOLD),
+            "选中 source 行必须加粗"
+        );
+    }
+
+    fn row_starting_with(buffer: &ratatui::buffer::Buffer, prefix: &str) -> Option<Style> {
+        let width = buffer.area.width as usize;
+        for y in 0..buffer.area.height {
+            let row: String = (0..width)
+                .map(|x| buffer.cell((x as u16, y)).map(|c| c.symbol()).unwrap_or(""))
+                .collect();
+            if row.starts_with(prefix) {
+                return buffer.cell((0, y)).map(|c| c.style());
+            }
+        }
+        None
     }
 
     #[test]
@@ -1139,6 +1166,7 @@ mod tests {
         let (_dir, manager, cfg) = temp_env();
         let mut app = app_with_source(manager, &cfg);
         app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Right));
         app.handle_key(key(KeyCode::Char('s')));
         assert_eq!(app.prompt, Prompt::Value);
         assert_eq!(app.input, "Ada");
@@ -1194,6 +1222,7 @@ mod tests {
         // app 中保存的仍是扫描时的旧行号：user.name 在第 2 行
         assert_eq!(app.apps[0].sources[0].settings[0].line, 2);
         app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Right));
         app.handle_key(key(KeyCode::Char('s')));
         for _ in 0..3 {
             app.handle_key(key(KeyCode::Backspace));
@@ -1247,6 +1276,7 @@ mod tests {
             },
         ];
         app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Right));
         app.handle_key(key(KeyCode::Char('j'))); // 移到第二条
         app.handle_key(key(KeyCode::Char('s')));
         assert_eq!(app.input, "Grace");
@@ -1283,6 +1313,7 @@ mod tests {
         app.apps[0].sources[0].settings[0].occ = 3;
         app.apps[0].sources[0].settings[0].line = 4;
         app.apps[0].sources[0].settings[0].value = "Grace".into();
+        app.handle_key(key(KeyCode::Right));
         app.handle_key(key(KeyCode::Right));
         app.handle_key(key(KeyCode::Char('s')));
         assert_eq!(app.prompt, Prompt::Value, "编辑前不应被拒");
@@ -1326,12 +1357,16 @@ mod tests {
 
     #[test]
     fn editor_parse_error_discards_stage_and_reports_status() {
+        // 与 j_moves 测试串行化：两个测试共享进程环境变量 EDITOR/VISUAL
+        let _env_guard = EDITOR_ENV_LOCK.lock().unwrap();
         let (dir, manager, cfg) = temp_env();
         let mut app = app_with_source(manager, &cfg);
         let saved_visual = std::env::var_os("VISUAL");
         let saved_editor = std::env::var_os("EDITOR");
         std::env::remove_var("VISUAL");
         std::env::set_var("EDITOR", "'");
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Right));
         app.handle_key(key(KeyCode::Char('e')));
         match saved_visual {
             Some(v) => std::env::set_var("VISUAL", v),
@@ -1374,7 +1409,11 @@ mod tests {
             },
         ];
         app.setting_index = 0;
-        assert_eq!(app.selected_detail_row(&app.apps[0].sources[0]), 1, "[file] 占 1 行");
+        assert_eq!(
+            app.selected_detail_row(&app.apps[0].sources[0]),
+            1,
+            "[file] 占 1 行"
+        );
         app.setting_index = 2;
         assert_eq!(app.selected_detail_row(&app.apps[0].sources[0]), 3);
         // 诊断行让设置行号 +1
@@ -1406,7 +1445,8 @@ mod tests {
 
     #[test]
     fn detail_viewport_keeps_bottom_setting_visible_on_small_terminals() {
-        // 30 个设置 + 标题/应用/描述 4 行头：detail 区仅 6 行时，
+        // 30 个设置 + 头 7 行（标题/应用/描述/Sources 分区，公式 1+apps+2+2+visible_sources）：
+        // 80x16 终端中部 10 行中 detail 区仅 3 行时，
         // 滚动视口必须包含选中的最后一个设置（当前实现按整块高度计算，底部被裁剪）
         let mut app = App::new(
             sample_apps(),
@@ -1487,6 +1527,8 @@ mod tests {
 
     #[test]
     fn j_moves_between_sources_and_edits_target_the_selected_one() {
+        // 与 editor_parse_error 测试串行化：两个测试共享进程环境变量 EDITOR/VISUAL
+        let _env_guard = EDITOR_ENV_LOCK.lock().unwrap();
         let (dir, manager, cfg) = temp_env();
         let extra = dir.path().join("home/.gitconfig.extra");
         std::fs::write(&extra, b"[user]\nname = Grace\n").unwrap();
@@ -1552,8 +1594,15 @@ mod tests {
             core::Manager::default(),
             i18n::Catalog { chinese: false },
         );
-        app.handle_key(key(KeyCode::Char('s')));
-        assert_eq!(app.prompt, Prompt::None);
-        assert!(!app.status.is_empty());
+        for code in [KeyCode::Char('s'), KeyCode::Char('e'), KeyCode::Char('r')] {
+            app.handle_key(key(code));
+            assert_eq!(
+                app.prompt,
+                Prompt::None,
+                "Apps 层按 {code:?} 不得进入编辑流程"
+            );
+            assert!(!app.status.is_empty(), "Apps 层按 {code:?} 必须给出提示");
+            assert!(app.pending.is_none(), "Apps 层按 {code:?} 不得留下暂存");
+        }
     }
 }
