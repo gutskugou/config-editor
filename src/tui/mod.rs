@@ -1418,6 +1418,10 @@ mod tests {
         let (dir, manager, cfg) = temp_env();
         let extra = dir.path().join("home/.gitconfig.extra");
         std::fs::write(&extra, b"[user]\nname = Grace\n").unwrap();
+        let saved_visual = std::env::var_os("VISUAL");
+        let saved_editor = std::env::var_os("EDITOR");
+        std::env::remove_var("VISUAL");
+        std::env::set_var("EDITOR", "sed -i s/Grace/GraceX/");
         let mut app = app_with_source(manager, &cfg);
         app.apps[0].sources.push(Source {
             path: extra.to_str().unwrap().into(),
@@ -1445,6 +1449,14 @@ mod tests {
             "必须编辑选中的第二个 source:\n{text}"
         );
         let _ = app.manager.discard(&app.pending.take().unwrap());
+        match saved_visual {
+            Some(v) => std::env::set_var("VISUAL", v),
+            None => std::env::remove_var("VISUAL"),
+        }
+        match saved_editor {
+            Some(v) => std::env::set_var("EDITOR", v),
+            None => std::env::remove_var("EDITOR"),
+        }
         let _ = dir;
     }
 
