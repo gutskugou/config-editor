@@ -15,6 +15,7 @@ use std::path::Path;
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Focus {
     Apps,
+    Sources,
     Settings,
 }
 
@@ -32,6 +33,7 @@ pub struct App {
     pub lang: Catalog,
     pub app_index: usize,
     pub setting_index: usize,
+    pub source_index: usize,
     pub focus: Focus,
     pub prompt: Prompt,
     pub input: String,
@@ -94,6 +96,7 @@ impl App {
             lang,
             app_index: 0,
             setting_index: 0,
+            source_index: 0,
             focus: Focus::Apps,
             prompt: Prompt::None,
             input: String::new(),
@@ -130,6 +133,10 @@ impl App {
         Some(list[self.app_index.min(list.len() - 1)])
     }
 
+    pub fn current_source(&self) -> Option<&Source> {
+        self.current_app()?.sources.get(self.source_index)
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         if self.quit {
             return;
@@ -147,8 +154,8 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => self.focus = Focus::Apps,
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => self.enter_settings(),
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => self.focus_up(),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => self.focus_down(),
             KeyCode::Char('/') => {
                 self.prompt = Prompt::Search;
                 self.input = self.filter.clone();
@@ -164,20 +171,44 @@ impl App {
         }
     }
 
+    fn focus_up(&mut self) {
+        match self.focus {
+            Focus::Settings => self.focus = Focus::Sources,
+            Focus::Sources => self.focus = Focus::Apps,
+            Focus::Apps => {}
+        }
+    }
+
+    fn focus_down(&mut self) {
+        match self.focus {
+            Focus::Apps => self.enter_sources(),
+            Focus::Sources => self.enter_settings(),
+            Focus::Settings => {}
+        }
+    }
+
+    fn enter_sources(&mut self) {
+        if self.current_app().is_some() {
+            self.focus = Focus::Sources;
+            self.source_index = 0;
+        }
+    }
+
     fn enter_settings(&mut self) {
-        if let Some(app) = self.current_app() {
-            if setting_count(app) > 0 {
-                self.focus = Focus::Settings;
-                self.setting_index = 0;
-            } else {
-                self.status = self
-                    .lang
-                    .text(
-                        "No structured settings; press e to edit a staged copy",
-                        "没有结构化设置；按 e 编辑暂存副本",
-                    )
-                    .into();
-            }
+        let Some(source) = self.current_source() else {
+            return;
+        };
+        if !source.settings.is_empty() {
+            self.focus = Focus::Settings;
+            self.setting_index = 0;
+        } else {
+            self.status = self
+                .lang
+                .text(
+                    "No structured settings; press e to edit a staged copy",
+                    "没有结构化设置；按 e 编辑暂存副本",
+                )
+                .into();
         }
     }
 
@@ -812,10 +843,6 @@ impl App {
     }
 }
 
-fn setting_count(app: &Application) -> usize {
-    app.sources.iter().map(|s| s.settings.len()).sum()
-}
-
 fn clamp_i(value: isize, min: usize, max: usize) -> isize {
     (value.max(min as isize)).min(max as isize)
 }
@@ -1325,5 +1352,50 @@ mod tests {
             text.contains("> user.k29"),
             "选中标记必须与最后一个设置同行:\n{text}"
         );
+    }
+
+    #[test]
+    fn arrow_keys_traverse_three_levels_of_focus() {
+        let mut app = App::new(
+            sample_apps(),
+            core::Manager::default(),
+            i18n::Catalog { chinese: false },
+        );
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.focus, Focus::Sources);
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.focus, Focus::Settings);
+        assert_eq!(app.setting_index, 0);
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.focus, Focus::Sources);
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.focus, Focus::Apps);
+        // 最顶层 Left/Esc 不动作
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.focus, Focus::Apps);
+    }
+
+    #[test]
+    fn entering_sources_resets_source_index() {
+        let mut app = App::new(
+            sample_apps(),
+            core::Manager::default(),
+            i18n::Catalog { chinese: false },
+        );
+        // 两个 source，先选中第二个再退出重进
+        app.apps[0].sources.push(Source {
+            path: "/home/me/.gitconfig.extra".into(),
+            resolved: None,
+            exists: true,
+            format: Format::Git,
+            diagnostic: None,
+            settings: vec![],
+        });
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.source_index, 1);
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.source_index, 0, "重进 Sources 必须重置索引");
     }
 }
