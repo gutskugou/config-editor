@@ -213,42 +213,56 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if self.focus == Focus::Apps {
-            let list = self.filtered();
-            if list.is_empty() {
-                return;
+        match self.focus {
+            Focus::Apps => {
+                let list = self.filtered();
+                if list.is_empty() {
+                    return;
+                }
+                self.app_index =
+                    clamp_i(self.app_index as isize + delta, 0, list.len() - 1) as usize;
+                self.source_index = 0;
+                self.setting_index = 0;
             }
-            self.app_index = clamp_i(self.app_index as isize + delta, 0, list.len() - 1) as usize;
-            self.setting_index = 0;
-        } else {
-            let Some(app) = self.current_app() else {
-                return;
-            };
-            let count = app.sources.iter().map(|s| s.settings.len()).sum::<usize>();
-            if count > 0 {
-                self.setting_index =
-                    clamp_i(self.setting_index as isize + delta, 0, count - 1) as usize;
+            Focus::Sources => {
+                let Some(app) = self.current_app() else {
+                    return;
+                };
+                if app.sources.is_empty() {
+                    return;
+                }
+                self.source_index =
+                    clamp_i(self.source_index as isize + delta, 0, app.sources.len() - 1) as usize;
+                self.setting_index = 0;
+            }
+            Focus::Settings => {
+                let Some(source) = self.current_source() else {
+                    return;
+                };
+                if source.settings.is_empty() {
+                    return;
+                }
+                self.setting_index = clamp_i(
+                    self.setting_index as isize + delta,
+                    0,
+                    source.settings.len() - 1,
+                ) as usize;
             }
         }
     }
 
     fn selection(&self) -> Option<(&Application, &Source, Option<&Setting>)> {
+        if self.focus == Focus::Apps {
+            return None;
+        }
         let app = self.current_app()?;
-        let mut row = 0;
-        for source in &app.sources {
-            for setting in &source.settings {
-                if row == self.setting_index {
-                    return Some((app, source, Some(setting)));
-                }
-                row += 1;
-            }
-        }
-        for source in &app.sources {
-            if source.exists {
-                return Some((app, source, None));
-            }
-        }
-        None
+        let source = app.sources.get(self.source_index)?;
+        let setting = if self.focus == Focus::Settings {
+            source.settings.get(self.setting_index)
+        } else {
+            None
+        };
+        Some((app, source, setting))
     }
 
     fn start_structured(&mut self) {
@@ -1397,5 +1411,65 @@ mod tests {
         app.handle_key(key(KeyCode::Left));
         app.handle_key(key(KeyCode::Right));
         assert_eq!(app.source_index, 0, "重进 Sources 必须重置索引");
+    }
+
+    #[test]
+    fn j_moves_between_sources_and_edits_target_the_selected_one() {
+        let (dir, manager, cfg) = temp_env();
+        let extra = dir.path().join("home/.gitconfig.extra");
+        std::fs::write(&extra, b"[user]\nname = Grace\n").unwrap();
+        let mut app = app_with_source(manager, &cfg);
+        app.apps[0].sources.push(Source {
+            path: extra.to_str().unwrap().into(),
+            resolved: Some(extra.to_str().unwrap().into()),
+            exists: true,
+            format: Format::Git,
+            diagnostic: None,
+            settings: vec![],
+        });
+        app.handle_key(key(KeyCode::Right)); // Sources
+        app.handle_key(key(KeyCode::Char('j'))); // 第二个 source
+        assert_eq!(app.source_index, 1);
+        app.handle_key(key(KeyCode::Right)); // Settings（第二个 source 无设置 → 提示）
+        assert_eq!(app.focus, Focus::Sources, "无设置的 source 不进入 Settings");
+        assert!(
+            app.status.contains("No structured settings") || app.status.contains("没有结构化设置")
+        );
+        // 用 e 编辑第二个 source（focus 停在 Sources，选中第二个）
+        app.handle_key(key(KeyCode::Char('e')));
+        let change = app.pending.as_ref().expect("pending change");
+        let stage = change.stage.clone();
+        let text = String::from_utf8(std::fs::read(&stage).unwrap()).unwrap();
+        assert!(
+            text.contains("name = Grace"),
+            "必须编辑选中的第二个 source:\n{text}"
+        );
+        let _ = app.manager.discard(&app.pending.take().unwrap());
+        let _ = dir;
+    }
+
+    #[test]
+    fn s_in_sources_layer_prompts_to_enter_settings() {
+        let mut app = App::new(
+            sample_apps(),
+            core::Manager::default(),
+            i18n::Catalog { chinese: false },
+        );
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(app.prompt, Prompt::None);
+        assert!(!app.status.is_empty(), "必须给出提示");
+    }
+
+    #[test]
+    fn s_e_r_in_apps_layer_prompts_to_enter_sources() {
+        let mut app = App::new(
+            sample_apps(),
+            core::Manager::default(),
+            i18n::Catalog { chinese: false },
+        );
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(app.prompt, Prompt::None);
+        assert!(!app.status.is_empty());
     }
 }
