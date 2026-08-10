@@ -696,69 +696,100 @@ impl App {
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
             )));
-            let details = self.detail_lines(app, width);
-            // 详情区高度必须扣除标题行、应用列表、空行与描述行占用的行数；
-            // 滚动位置用选中设置的实际显示行号，而非设置序号
-            let header = 1 + apps.len() + 2;
-            let available = area.height.saturating_sub(header as u16) as usize;
-            let start = visible_start(self.selected_detail_row(app), details.len(), available);
-            let end = (start + available).min(details.len());
-            for detail in &details[start..end] {
-                lines.push(Line::from(detail.clone()));
+            // Sources 分区：标题 + source 行（高度 min(count,4)）+ 设置标题
+            let source = self.current_source();
+            let source_count = app.sources.len();
+            let visible_sources = source_count.min(4);
+            let src_start = visible_start(self.source_index, source_count, visible_sources);
+            let heading1 = Span::styled(
+                truncate(
+                    &format!("── {} ──", self.lang.text("Sources", "配置文件")),
+                    width,
+                ),
+                Style::default().fg(Color::DarkGray),
+            );
+            lines.push(Line::from(heading1));
+            if let Some(source) = source {
+                for (i, s) in app
+                    .sources
+                    .iter()
+                    .enumerate()
+                    .skip(src_start)
+                    .take(visible_sources)
+                {
+                    let is_selected = self.focus == Focus::Sources && i == self.source_index;
+                    let flag = if s.exists { "file" } else { "missing" };
+                    let marker = if is_selected { "> " } else { "  " };
+                    let text = format!("{marker}[{flag}] {}", s.path);
+                    let span = if is_selected {
+                        Span::styled(
+                            truncate(&text, width),
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        Span::raw(truncate(&text, width))
+                    };
+                    lines.push(Line::from(span));
+                }
+                let heading2 = Span::styled(
+                    truncate(
+                        &format!("── {} ──", self.lang.text("Settings", "设置")),
+                        width,
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                );
+                lines.push(Line::from(heading2));
+                // 设置区可用高度：中部高度 - 头部(apps/desc) - sources 分区
+                let details = self.detail_lines(source, width);
+                let header = 1 + apps.len() + 2 + 2 + visible_sources;
+                let available = area.height.saturating_sub(header as u16) as usize;
+                let start = visible_start(self.selected_detail_row(source), details.len(), available);
+                let end = (start + available).min(details.len());
+                for detail in &details[start..end] {
+                    lines.push(Line::from(detail.clone()));
+                }
             }
         }
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
     }
 
-    /// 选中设置在 detail_lines 中的实际显示行号（含各 source 的 [file]/[missing]
-    /// 与诊断行），而不是全局设置序号；用于滚动窗口计算。
-    fn selected_detail_row(&self, app: &Application) -> usize {
-        let mut row = 0;
-        let mut idx = self.setting_index;
-        for source in &app.sources {
-            let header = 1 + usize::from(source.diagnostic.is_some());
-            if idx < source.settings.len() {
-                return row + header + idx;
-            }
-            idx -= source.settings.len();
-            row += header + source.settings.len();
-        }
-        0
+    /// 选中设置在 detail_lines 中的实际显示行号（含 [file]/[missing] 与诊断行），
+    /// 而不是设置序号；用于滚动窗口计算。
+    fn selected_detail_row(&self, source: &Source) -> usize {
+        1 + usize::from(source.diagnostic.is_some()) + self.setting_index
     }
 
-    fn detail_lines(&self, app: &Application, width: usize) -> Vec<Span<'static>> {
+    fn detail_lines(&self, source: &Source, width: usize) -> Vec<Span<'static>> {
         let mut lines = Vec::new();
-        let mut row = 0;
-        for source in &app.sources {
-            let flag = if source.exists { "file" } else { "missing" };
-            lines.push(Span::raw(truncate(
-                &format!("  [{flag}] {}", source.path),
-                width,
-            )));
-            if let Some(d) = &source.diagnostic {
-                lines.push(Span::styled(
-                    format!("  ! {d}"),
-                    Style::default().fg(Color::Red),
-                ));
-            }
-            for setting in &source.settings {
-                let is_selected = self.focus == Focus::Settings && row == self.setting_index;
-                let marker = if is_selected { "  > " } else { "    " };
-                let value = truncate(&setting.value, width.saturating_sub(34).max(8));
-                let text = format!("{}{:<28} {}", marker, setting.key, value);
-                let span = if is_selected {
-                    Span::styled(
-                        truncate(&text, width),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    Span::raw(truncate(&text, width))
-                };
-                lines.push(span);
-                row += 1;
-            }
+        let flag = if source.exists { "file" } else { "missing" };
+        lines.push(Span::raw(truncate(
+            &format!("  [{flag}] {}", source.path),
+            width,
+        )));
+        if let Some(d) = &source.diagnostic {
+            lines.push(Span::styled(
+                format!("  ! {d}"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        for (row, setting) in source.settings.iter().enumerate() {
+            let is_selected = self.focus == Focus::Settings && row == self.setting_index;
+            let marker = if is_selected { "  > " } else { "    " };
+            let value = truncate(&setting.value, width.saturating_sub(34).max(8));
+            let text = format!("{}{:<28} {}", marker, setting.key, value);
+            let span = if is_selected {
+                Span::styled(
+                    truncate(&text, width),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw(truncate(&text, width))
+            };
+            lines.push(span);
         }
         lines
     }
@@ -996,6 +1027,57 @@ mod tests {
         assert!(text.contains("Config Editor"));
         assert!(text.contains("user.name"));
         assert!(text.contains("q quit"));
+    }
+
+    #[test]
+    fn render_shows_sources_section_and_only_selected_source_settings() {
+        let mut app = App::new(
+            sample_apps(),
+            core::Manager::default(),
+            i18n::Catalog { chinese: false },
+        );
+        app.apps[0].sources[0].settings = vec![Setting {
+            key: "user.first".into(),
+            value: "A".into(),
+            line: 1,
+            occ: 1,
+            editable: true,
+            sensitive: false,
+        }];
+        app.apps[0].sources.push(Source {
+            path: "/home/me/.gitconfig.extra".into(),
+            resolved: None,
+            exists: true,
+            format: Format::Git,
+            diagnostic: None,
+            settings: vec![Setting {
+                key: "user.second".into(),
+                value: "B".into(),
+                line: 1,
+                occ: 1,
+                editable: true,
+                sensitive: false,
+            }],
+        });
+        app.focus = Focus::Sources;
+        app.source_index = 1;
+        app.width = 80;
+        app.height = 24;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains(".gitconfig"), "source 路径必须可见:\n{text}");
+        assert!(text.contains(".gitconfig.extra"));
+        assert!(
+            text.contains("user.second"),
+            "设置区必须显示选中 source 的设置:\n{text}"
+        );
+        assert!(
+            !text.contains("user.first"),
+            "设置区不得混入其他 source 的设置:\n{text}"
+        );
     }
 
     #[test]
@@ -1297,16 +1379,16 @@ mod tests {
             },
         ];
         app.setting_index = 0;
-        assert_eq!(app.selected_detail_row(&app.apps[0]), 1, "[file] 占 1 行");
+        assert_eq!(app.selected_detail_row(&app.apps[0].sources[0]), 1, "[file] 占 1 行");
         app.setting_index = 2;
-        assert_eq!(app.selected_detail_row(&app.apps[0]), 3);
-        // 诊断行让后续设置行号 +1
+        assert_eq!(app.selected_detail_row(&app.apps[0].sources[0]), 3);
+        // 诊断行让设置行号 +1
         app.apps[0].sources[0].diagnostic = Some("boom".into());
         app.setting_index = 0;
-        assert_eq!(app.selected_detail_row(&app.apps[0]), 2);
+        assert_eq!(app.selected_detail_row(&app.apps[0].sources[0]), 2);
         app.setting_index = 1;
-        assert_eq!(app.selected_detail_row(&app.apps[0]), 3);
-        // 两个 source：行号跨过第一个 source 的 [file] + 设置行
+        assert_eq!(app.selected_detail_row(&app.apps[0].sources[0]), 3);
+        // 第二个 source 独立计算行号：1([file]) + 1(诊断) = 2 行前缀
         let second = Source {
             path: "/home/me/.gitconfig.extra".into(),
             resolved: None,
@@ -1319,16 +1401,11 @@ mod tests {
             }],
         };
         app.apps[0].sources.push(second);
-        app.apps[0].sources[0].diagnostic = None;
-        app.apps[0].sources[0].settings = vec![Setting {
-            key: "k1".into(),
-            ..Default::default()
-        }];
-        app.setting_index = 1; // 第二个 source 的第一个设置
+        app.setting_index = 0;
         assert_eq!(
-            app.selected_detail_row(&app.apps[0]),
-            4,
-            "1([file]) + 1(k1) + 1([file]) + 1(诊断) = 4 行前缀"
+            app.selected_detail_row(&app.apps[0].sources[1]),
+            2,
+            "1([file]) + 1(诊断) = 2 行前缀"
         );
     }
 
