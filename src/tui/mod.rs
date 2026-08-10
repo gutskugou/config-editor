@@ -269,7 +269,7 @@ impl App {
         let Some((_app, _source, setting)) = self.selection() else {
             self.status = self
                 .lang
-                .text("Select an editable setting", "请选择可编辑的设置")
+                .text("Enter a configuration source first", "请先进入配置源")
                 .into();
             return;
         };
@@ -370,10 +370,7 @@ impl App {
         let Some((_app, source, _)) = self.selection() else {
             self.status = self
                 .lang
-                .text(
-                    "Select an existing configuration file",
-                    "请选择已有的配置文件",
-                )
+                .text("Enter a configuration source first", "请先进入配置源")
                 .into();
             return;
         };
@@ -529,10 +526,7 @@ impl App {
         let Some((_app, source, _)) = self.selection() else {
             self.status = self
                 .lang
-                .text(
-                    "Select an existing configuration file",
-                    "请选择已有的配置文件",
-                )
+                .text("Enter a configuration source first", "请先进入配置源")
                 .into();
             return Ok(());
         };
@@ -745,7 +739,8 @@ impl App {
                 let details = self.detail_lines(source, width);
                 let header = 1 + apps.len() + 2 + 2 + visible_sources;
                 let available = area.height.saturating_sub(header as u16) as usize;
-                let start = visible_start(self.selected_detail_row(source), details.len(), available);
+                let start =
+                    visible_start(self.selected_detail_row(source), details.len(), available);
                 let end = (start + available).min(details.len());
                 for detail in &details[start..end] {
                     lines.push(Line::from(detail.clone()));
