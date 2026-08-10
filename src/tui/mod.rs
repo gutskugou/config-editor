@@ -3,13 +3,17 @@ use crate::domain::{Application, Capability, Setting, Source};
 use crate::i18n::Catalog;
 use crate::parse::{parse_settings, relocate_setting, replace_setting};
 use core::diff::simple_diff;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 use std::io;
+
+mod keymap;
+
+use keymap::Action;
 use std::path::Path;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -149,24 +153,22 @@ impl App {
     }
 
     fn handle_normal(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => self.focus_up(),
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => self.focus_down(),
-            KeyCode::Char('/') => {
+        match keymap::normal_action(key) {
+            Action::Quit => self.quit = true,
+            Action::Move(delta) => self.move_selection(delta),
+            Action::FocusUp => self.focus_up(),
+            Action::FocusDown => self.focus_down(),
+            Action::Search => {
                 self.prompt = Prompt::Search;
                 self.input = self.filter.clone();
             }
-            KeyCode::Char('s') => self.start_structured(),
-            KeyCode::Char('e') => {
+            Action::Set => self.start_structured(),
+            Action::Edit => {
                 if let Err(e) = self.start_editor() {
                     self.status = format!("! {e}");
                 }
             }
-            KeyCode::Char('r') => self.start_restore(),
+            Action::Restore => self.start_restore(),
             _ => {}
         }
     }
@@ -401,8 +403,8 @@ impl App {
     }
 
     fn handle_confirm(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        match keymap::confirm_action(key) {
+            Action::Quit => {
                 if let Some(change) = self.pending.take() {
                     let _ = self.manager.discard(&change);
                 }
@@ -411,34 +413,25 @@ impl App {
                 self.diff_offset = 0;
                 self.quit = true;
             }
-            KeyCode::Char('q') => {
-                if let Some(change) = self.pending.take() {
-                    let _ = self.manager.discard(&change);
-                }
-                self.prompt = Prompt::None;
-                self.diff.clear();
-                self.diff_offset = 0;
-                self.quit = true;
+            Action::Move(delta) => {
+                self.diff_offset = if delta < 0 {
+                    self.diff_offset.saturating_sub(1)
+                } else {
+                    self.diff_offset
+                        .saturating_add(1)
+                        .min(self.max_diff_offset())
+                };
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.diff_offset = self.diff_offset.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.diff_offset = self
-                    .diff_offset
-                    .saturating_add(1)
-                    .min(self.max_diff_offset());
-            }
-            KeyCode::PageUp => {
+            Action::PgUp => {
                 self.diff_offset = self.diff_offset.saturating_sub(self.diff_page_size());
             }
-            KeyCode::PageDown => {
+            Action::PgDn => {
                 self.diff_offset = self
                     .diff_offset
                     .saturating_add(self.diff_page_size())
                     .min(self.max_diff_offset());
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            Action::Apply => {
                 let pending = self.pending.take();
                 if let Some(change) = pending {
                     match self.manager.apply(&change) {
@@ -462,7 +455,7 @@ impl App {
                 self.diff.clear();
                 self.diff_offset = 0;
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            Action::Reject => {
                 if let Some(change) = self.pending.take() {
                     let _ = self.manager.discard(&change);
                 }
@@ -476,21 +469,21 @@ impl App {
     }
 
     fn handle_text_input(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        match keymap::text_action(key) {
+            Action::Quit => {
                 if let Some(change) = self.pending.take() {
                     let _ = self.manager.discard(&change);
                 }
                 self.quit = true;
             }
-            KeyCode::Esc => {
+            Action::Cancel => {
                 self.prompt = Prompt::None;
                 self.input.clear();
             }
-            KeyCode::Backspace => {
+            Action::Backspace => {
                 self.input.pop();
             }
-            KeyCode::Enter => {
+            Action::Submit => {
                 if self.prompt == Prompt::Search {
                     self.filter = self.input.clone();
                     self.app_index = 0;
@@ -499,7 +492,7 @@ impl App {
                     self.finish_structured();
                 }
             }
-            KeyCode::Char(c) => self.input.push(c),
+            Action::Char(c) => self.input.push(c),
             _ => {}
         }
     }
@@ -1604,5 +1597,53 @@ mod tests {
             assert!(!app.status.is_empty(), "Apps 层按 {code:?} 必须给出提示");
             assert!(app.pending.is_none(), "Apps 层按 {code:?} 不得留下暂存");
         }
+    }
+
+    #[test]
+    fn normal_keymap_maps_all_binding_keys() {
+        use super::keymap::{normal_action, Action};
+        let m = |c| key(KeyCode::Char(c));
+        assert_eq!(normal_action(m('q')), Action::Quit);
+        assert_eq!(normal_action(m('k')), Action::Move(-1));
+        assert_eq!(normal_action(key(KeyCode::Up)), Action::Move(-1));
+        assert_eq!(normal_action(m('j')), Action::Move(1));
+        assert_eq!(normal_action(key(KeyCode::Down)), Action::Move(1));
+        assert_eq!(normal_action(m('h')), Action::FocusUp);
+        assert_eq!(normal_action(key(KeyCode::Left)), Action::FocusUp);
+        assert_eq!(normal_action(key(KeyCode::Esc)), Action::FocusUp);
+        assert_eq!(normal_action(m('l')), Action::FocusDown);
+        assert_eq!(normal_action(key(KeyCode::Right)), Action::FocusDown);
+        assert_eq!(normal_action(key(KeyCode::Enter)), Action::FocusDown);
+        assert_eq!(normal_action(m('/')), Action::Search);
+        assert_eq!(normal_action(m('s')), Action::Set);
+        assert_eq!(normal_action(m('e')), Action::Edit);
+        assert_eq!(normal_action(m('r')), Action::Restore);
+        assert_eq!(normal_action(m('x')), Action::None);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(normal_action(ctrl_c), Action::Quit);
+    }
+
+    #[test]
+    fn confirm_and_text_keymap_map_all_binding_keys() {
+        use super::keymap::{confirm_action, text_action, Action};
+        let m = |c| key(KeyCode::Char(c));
+        assert_eq!(confirm_action(m('y')), Action::Apply);
+        assert_eq!(confirm_action(m('Y')), Action::Apply);
+        assert_eq!(confirm_action(m('n')), Action::Reject);
+        assert_eq!(confirm_action(m('N')), Action::Reject);
+        assert_eq!(confirm_action(key(KeyCode::Esc)), Action::Reject);
+        assert_eq!(confirm_action(m('k')), Action::Move(-1));
+        assert_eq!(confirm_action(m('j')), Action::Move(1));
+        assert_eq!(confirm_action(key(KeyCode::PageUp)), Action::PgUp);
+        assert_eq!(confirm_action(key(KeyCode::PageDown)), Action::PgDn);
+        assert_eq!(confirm_action(m('q')), Action::Quit);
+        assert_eq!(confirm_action(m('x')), Action::None);
+        assert_eq!(text_action(key(KeyCode::Esc)), Action::Cancel);
+        assert_eq!(text_action(key(KeyCode::Backspace)), Action::Backspace);
+        assert_eq!(text_action(key(KeyCode::Enter)), Action::Submit);
+        assert_eq!(text_action(m('a')), Action::Char('a'));
+        assert_eq!(text_action(m('x')), Action::Char('x'));
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(text_action(ctrl_c), Action::Quit);
     }
 }
