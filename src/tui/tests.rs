@@ -265,9 +265,9 @@ fn structured_edit_stages_replacement_and_builds_diff() {
     assert_eq!(app.prompt, Prompt::Confirm);
     let change = app.pending.as_ref().expect("pending change");
     let stage = change.stage.clone();
-    assert_eq!(std::fs::read(&stage).unwrap(), b"[user]\nname=Grace\n");
+    assert_eq!(std::fs::read(&stage).unwrap(), b"[user]\nname = Grace\n");
     assert!(app.diff.contains("name = Ada"));
-    assert!(app.diff.contains("name=Grace"));
+    assert!(app.diff.contains("name = Grace"));
     let _ = app.manager.discard(&app.pending.take().unwrap());
     assert!(!stage.exists());
 }
@@ -324,7 +324,7 @@ fn structured_edit_relocates_stale_line_number() {
     let change = app.pending.as_ref().expect("pending change");
     let text = String::from_utf8(std::fs::read(&change.stage).unwrap()).unwrap();
     assert!(
-        text.contains("name=Grace"),
+        text.contains("name = Grace"),
         "user.name 行必须被修改（当前第 3 行）:\n{text}"
     );
     assert!(
@@ -380,10 +380,10 @@ fn structured_edit_targets_selected_duplicate_occurrence() {
         "第一条同名键不得被修改:\n{text}"
     );
     assert!(
-        text.contains("name=Rust"),
+        text.contains("name = Rust"),
         "选中的第二条必须被修改:\n{text}"
     );
-    assert!(!text.contains("name=Grace"), "第二条已改为 Rust:\n{text}");
+    assert!(!text.contains("name = Grace"), "第二条已改为 Rust:\n{text}");
     let _ = app.manager.discard(&app.pending.take().unwrap());
     let _ = dir;
 }

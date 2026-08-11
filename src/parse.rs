@@ -26,6 +26,9 @@ pub fn parse_settings(format: Format, content: &[u8]) -> Vec<Setting> {
         let Some((mut key, mut value)) = split_setting(format, line) else {
             continue;
         };
+        if format == Format::Toml {
+            value = strip_inline_comment(&value).trim_end().to_string();
+        }
         if format == Format::Ssh
             && (key.eq_ignore_ascii_case("Host") || key.eq_ignore_ascii_case("Match"))
         {
@@ -115,12 +118,14 @@ pub fn replace_setting(
     if !setting.editable || setting.sensitive {
         return Err("sensitive settings cannot be edited here".into());
     }
-    let text = String::from_utf8_lossy(content);
-    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+    // 严格 UTF-8：无效字节不得被 from_utf8_lossy 改写后写回
+    let text = std::str::from_utf8(content)
+        .map_err(|_| "file is not valid UTF-8; inline editing is disabled".to_string())?;
+    let mut lines: Vec<&str> = text.split('\n').collect();
     if setting.line < 1 || setting.line > lines.len() {
         return Err("setting line is no longer present".into());
     }
-    let line = lines[setting.line - 1].clone();
+    let line = lines[setting.line - 1];
     let indent: String = line
         .chars()
         .take_while(|c| *c == ' ' || *c == '\t')
@@ -130,7 +135,8 @@ pub fn replace_setting(
             .split_whitespace()
             .next()
             .ok_or("setting is not a key/value line")?;
-        lines[setting.line - 1] = format!("{}{} {}", indent, key, value);
+        let new_line = format!("{}{} {}", indent, key, value);
+        lines[setting.line - 1] = &new_line;
         return Ok(lines.join("\n").into_bytes());
     }
     let mut pos = line.find('=');
@@ -139,7 +145,8 @@ pub fn replace_setting(
     }
     if format == Format::Git && pos.is_none() {
         let key = line.trim();
-        lines[setting.line - 1] = format!("{}{}={}", indent, key, value);
+        let new_line = format!("{}{}={}", indent, key, value);
+        lines[setting.line - 1] = &new_line;
         return Ok(lines.join("\n").into_bytes());
     }
     let pos = pos.ok_or("setting is not a key/value line")?;
@@ -148,17 +155,57 @@ pub fn replace_setting(
     if format == Format::Toml && is_quoted(line[pos + 1..].trim()) && !is_quoted(&new_value) {
         new_value = format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
     }
+    let mut replaced;
     if matches!(format, Format::Properties | Format::Ini | Format::Git) {
-        lines[setting.line - 1] = format!("{}={}", prefix, new_value);
+        // 保留原始分隔符风格（" = " / "=" / ": " 等），不归一化为 "="。
+        // 分隔符严格为「空白 + 单个 =/: + 空白」：值以 =/: 开头时不得被吞入分隔符
+        let sep_start = line[..pos].trim_end().len();
+        let after_sep = line[pos + 1..]
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
+        let sep = &line[sep_start..pos + 1 + after_sep];
+        replaced = format!("{}{}{}", prefix, sep, new_value);
     } else {
         let space = if line[pos + 1..].starts_with(' ') {
             " "
         } else {
             ""
         };
-        lines[setting.line - 1] = format!("{} ={}{}", prefix, space, new_value);
+        replaced = format!("{} ={}{}", prefix, space, new_value);
     }
+    if format == Format::Toml {
+        // 行内注释（引号外的 # 及其后内容）必须保留
+        let rest = line[pos + 1..].trim();
+        let comment = rest[strip_inline_comment(rest).len()..].trim_end();
+        if !comment.is_empty() {
+            replaced = format!("{replaced} {comment}");
+        }
+    }
+    lines[setting.line - 1] = &replaced;
     Ok(lines.join("\n").into_bytes())
+}
+
+/// 截断行内注释：返回引号字符串之外的第一个 `#` 之前的子串。
+/// TOML 中 `#` 只出现在字符串值外时才是注释起始。
+fn strip_inline_comment(value: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for (i, c) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if in_double => escaped = true,
+            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => in_single = !in_single,
+            '#' if !in_single && !in_double => return &value[..i],
+            _ => {}
+        }
+    }
+    value
 }
 
 fn is_quoted(value: &str) -> bool {
@@ -178,6 +225,9 @@ pub fn relocate_setting(
     content: &[u8],
     setting: &Setting,
 ) -> Result<Option<Setting>, String> {
+    // 严格 UTF-8：无效字节文件不做行内编辑（与 replace_setting 一致）
+    std::str::from_utf8(content)
+        .map_err(|_| "file is not valid UTF-8; inline editing is disabled".to_string())?;
     let candidates: Vec<Setting> = parse_settings(format, content)
         .into_iter()
         .filter(|s| s.key == setting.key)
@@ -279,7 +329,7 @@ mod tests {
                 .unwrap();
         assert!(after.contains("# keep"));
         assert!(after.contains("email = ada@example.test"));
-        assert!(after.contains("name=Grace"));
+        assert!(after.contains("name = Grace"), "等号两侧空格风格必须保留");
     }
 
     #[test]
@@ -409,6 +459,123 @@ mod tests {
             sensitive: false,
         };
         assert!(replace_setting(Format::Git, b"x = y\n", &s, "z").is_err());
+    }
+
+    #[test]
+    fn replace_keeps_git_delimiter_spacing() {
+        let before = b"[user]\n\tname = Ada\n";
+        let setting = Setting {
+            key: "user.name".into(),
+            value: "Ada".into(),
+            line: 2,
+            occ: 1,
+            editable: true,
+            sensitive: false,
+        };
+        let after =
+            String::from_utf8(replace_setting(Format::Git, before, &setting, "Grace").unwrap())
+                .unwrap();
+        assert_eq!(after, "[user]\n\tname = Grace\n");
+        // 紧凑风格同样保留
+        let compact = b"[user]\nname=Ada\n";
+        let setting = Setting {
+            key: "user.name".into(),
+            value: "Ada".into(),
+            line: 2,
+            occ: 1,
+            editable: true,
+            sensitive: false,
+        };
+        let after =
+            String::from_utf8(replace_setting(Format::Git, compact, &setting, "Grace").unwrap())
+                .unwrap();
+        assert_eq!(after, "[user]\nname=Grace\n");
+    }
+
+    #[test]
+    fn replace_keeps_ini_colon_separator() {
+        let before = b"[global]\ntimeout: 30\n";
+        let setting = Setting {
+            key: "global.timeout".into(),
+            value: "30".into(),
+            line: 2,
+            occ: 1,
+            editable: true,
+            sensitive: false,
+        };
+        let after =
+            String::from_utf8(replace_setting(Format::Ini, before, &setting, "60").unwrap())
+                .unwrap();
+        assert_eq!(after, "[global]\ntimeout: 60\n");
+    }
+
+    #[test]
+    fn replace_does_not_swallow_value_starting_with_separator_char() {
+        // 值以 = 开头：分隔符只能取第一个 =，不得吞入值
+        let before = b"[user]\nname==Ada\n";
+        let settings = parse_settings(Format::Git, before);
+        assert_eq!(settings[0].value, "=Ada");
+        let after =
+            String::from_utf8(replace_setting(Format::Git, before, &settings[0], "Grace").unwrap())
+                .unwrap();
+        assert_eq!(after, "[user]\nname=Grace\n");
+        // INI 值以 : 开头同理
+        let ini = b"[global]\nurl :://host/x\n";
+        let settings = parse_settings(Format::Ini, ini);
+        assert_eq!(settings[0].value, "://host/x");
+        let after =
+            String::from_utf8(replace_setting(Format::Ini, ini, &settings[0], "://new/y").unwrap())
+                .unwrap();
+        assert_eq!(after, "[global]\nurl :://new/y\n");
+    }
+
+    #[test]
+    fn replace_toml_preserves_inline_comment() {
+        let before = b"format = \"$all\" # keep me\n";
+        let setting = Setting {
+            key: "format".into(),
+            value: "\"$all\"".into(),
+            line: 1,
+            occ: 1,
+            editable: true,
+            sensitive: false,
+        };
+        let after =
+            String::from_utf8(replace_setting(Format::Toml, before, &setting, "$all").unwrap())
+                .unwrap();
+        assert_eq!(after, "format = \"$all\" # keep me\n");
+    }
+
+    #[test]
+    fn parse_toml_strips_inline_comment_but_not_hash_in_string() {
+        let s = parse_settings(
+            Format::Toml,
+            b"format = \"$all\" # keep me\nkey = \"a#b\"\n",
+        );
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].value, "\"$all\"", "行内注释不得并入值");
+        assert_eq!(s[1].value, "\"a#b\"", "字符串内的 # 不得被剥离");
+    }
+
+    #[test]
+    fn replace_rejects_non_utf8_content_without_corruption() {
+        let content: Vec<u8> = b"# \xfe\xff comment\n[user]\nname = Ada\n".to_vec();
+        let setting = Setting {
+            key: "user.name".into(),
+            value: "Ada".into(),
+            line: 3,
+            occ: 1,
+            editable: true,
+            sensitive: false,
+        };
+        let err = replace_setting(Format::Git, &content, &setting, "Grace")
+            .expect_err("非 UTF-8 文件必须拒绝行内编辑");
+        assert!(err.contains("UTF-8"), "错误信息应说明 UTF-8 原因: {err}");
+        assert_eq!(content[2..4], [0xfe, 0xff], "原始字节不得被改写");
+        assert!(
+            relocate_setting(Format::Git, &content, &setting).is_err(),
+            "relocate 也必须拒绝非 UTF-8 内容"
+        );
     }
 
     #[test]

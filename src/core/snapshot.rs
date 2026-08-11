@@ -92,6 +92,12 @@ pub fn latest_snapshot(state_root: &Path, original_path: &str) -> Result<Snapsho
         if candidate.original_path != original_path {
             continue;
         }
+        // 快照元数据必须自证位于对应快照目录内：伪造/损坏的 metadata.json
+        // 不得把恢复内容重定向到任意文件
+        let dir = entry.path();
+        if candidate.content_path.parent() != Some(dir.as_path()) || candidate.path != dir {
+            continue;
+        }
         // 目录名含纳秒时间戳（%Y%m%dT%H%M%S%.9fZ），字典序即时间序；
         // created_at 只有秒精度，同秒快照无法靠它区分
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -163,5 +169,48 @@ mod tests {
     fn latest_errors_when_missing() {
         let state = tempfile::tempdir().unwrap();
         assert!(latest_snapshot(state.path(), "/nope").is_err());
+    }
+
+    #[test]
+    fn latest_skips_snapshot_whose_metadata_points_outside_its_dir() {
+        let state = tempfile::tempdir().unwrap();
+        let victim = state.path().join("victim");
+        std::fs::write(&victim, b"evil\n").unwrap();
+        let snap = create_snapshot(state.path(), "/a", b"good\n").unwrap();
+        let mut meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(snap.path.join("metadata.json")).unwrap(),
+        )
+        .unwrap();
+        // 伪造 content_path 指向快照目录外：该快照必须被跳过，不得用于恢复
+        meta["content_path"] = serde_json::Value::String(victim.to_str().unwrap().into());
+        std::fs::write(
+            snap.path.join("metadata.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            latest_snapshot(state.path(), "/a").is_err(),
+            "伪造 content_path 的快照必须被跳过"
+        );
+    }
+
+    #[test]
+    fn latest_skips_snapshot_whose_metadata_path_field_is_forged() {
+        let state = tempfile::tempdir().unwrap();
+        let snap = create_snapshot(state.path(), "/a", b"good\n").unwrap();
+        let mut meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(snap.path.join("metadata.json")).unwrap(),
+        )
+        .unwrap();
+        meta["path"] = serde_json::Value::String("/tmp/somewhere/else".into());
+        std::fs::write(
+            snap.path.join("metadata.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            latest_snapshot(state.path(), "/a").is_err(),
+            "path 字段与快照目录不符的快照必须被跳过"
+        );
     }
 }
