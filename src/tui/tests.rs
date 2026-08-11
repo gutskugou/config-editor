@@ -688,3 +688,318 @@ fn s_e_r_in_apps_layer_prompts_to_enter_sources() {
         assert!(app.pending.is_none(), "Apps 层按 {code:?} 不得留下暂存");
     }
 }
+
+fn many_apps(count: usize) -> Vec<Application> {
+    (0..count)
+        .map(|i| Application {
+            id: format!("app-{i}"),
+            name: format!("App {i}"),
+            ..Default::default()
+        })
+        .collect()
+}
+
+#[test]
+fn long_app_list_scrolls_selected_into_view() {
+    let mut app = App::new(
+        many_apps(12),
+        core::Manager::default(),
+        i18n::Catalog { chinese: false },
+    );
+    app.app_index = 11;
+    app.focus = Focus::Apps;
+    let backend = ratatui::backend::TestBackend::new(80, 14);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+    assert!(
+        text.contains("App 11"),
+        "选中的最后一个应用必须滚动进视口:\n{text}"
+    );
+    assert!(
+        !text.contains("App 0"),
+        "视口外的应用不得渲染（独立滚动状态）:\n{text}"
+    );
+}
+
+#[test]
+fn diff_renders_with_per_line_styles() {
+    let mut app = App::new(
+        sample_apps(),
+        core::Manager::default(),
+        i18n::Catalog { chinese: false },
+    );
+    app.prompt = Prompt::Confirm;
+    app.diff = "--- current\n+++ proposed\n@@ -1 +1 @@\n-old\n+new\n".to_string();
+    app.height = 24;
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    assert_eq!(
+        row_starting_with(&buffer, "-old").and_then(|s| s.fg),
+        Some(Color::Red),
+        "删除行必须为红色"
+    );
+    assert_eq!(
+        row_starting_with(&buffer, "+new").and_then(|s| s.fg),
+        Some(Color::Green),
+        "新增行必须为绿色"
+    );
+    assert_eq!(
+        row_starting_with(&buffer, "@@").and_then(|s| s.fg),
+        Some(Color::Cyan),
+        "hunk 头必须为青色"
+    );
+    assert_eq!(
+        row_starting_with(&buffer, "+++ proposed").and_then(|s| s.fg),
+        Some(Color::Magenta),
+        "文件头必须为洋红"
+    );
+}
+
+#[test]
+fn error_detail_view_shows_full_error_and_closes() {
+    let mut app = App::new(
+        sample_apps(),
+        core::Manager::default(),
+        i18n::Catalog { chinese: false },
+    );
+    app.status = "! first line\nsecond line of error".into();
+    app.handle_key(key(KeyCode::Char('d')));
+    assert!(app.error_view, "d 必须打开错误详情视图");
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+    assert!(
+        text.contains("second line of error"),
+        "完整错误详情必须可见:\n{text}"
+    );
+    app.handle_key(key(KeyCode::Esc));
+    assert!(!app.error_view);
+    assert!(app.status.is_empty(), "关闭错误视图应清空状态");
+}
+
+#[test]
+fn error_view_scrolls_with_j_and_k() {
+    let mut app = App::new(
+        sample_apps(),
+        core::Manager::default(),
+        i18n::Catalog { chinese: false },
+    );
+    app.status = "! line1\nline2\nline3\nline4\nline5\nline6".into();
+    app.handle_key(key(KeyCode::Char('d')));
+    assert!(app.error_view);
+    app.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(app.error_offset, 1);
+    app.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(app.error_offset, 2);
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(app.error_offset, 1);
+    // 顶部钳制
+    for _ in 0..10 {
+        app.handle_key(key(KeyCode::Char('k')));
+    }
+    assert_eq!(app.error_offset, 0);
+    // Enter 也可关闭
+    app.handle_key(key(KeyCode::Enter));
+    assert!(!app.error_view);
+}
+
+#[test]
+fn small_terminal_blocks_destructive_confirm() {
+    // 小终端下 diff/预览不可见：y 不得应用或恢复
+    let mut app = App::new(
+        sample_apps(),
+        core::Manager::default(),
+        i18n::Catalog { chinese: false },
+    );
+    app.terminal_small = true;
+    app.prompt = Prompt::Confirm;
+    app.diff = "-a\n+b\n".into();
+    app.pending = Some(core::Change {
+        target: "/tmp/x".into(),
+        stage: "/tmp/x.stage".into(),
+        base_hash: "h".into(),
+        identity: core::secure::Identity { dev: 0, ino: 0 },
+        mode: 0o600,
+        format: Format::Git,
+    });
+    app.handle_key(key(KeyCode::Char('y')));
+    assert_eq!(
+        app.prompt,
+        Prompt::Confirm,
+        "小终端不得应用变更（diff 不可见）"
+    );
+    assert!(app.pending.is_some(), "pending 不得被消费");
+    assert!(!app.status.is_empty(), "必须给出提示");
+    // n 取消仍然允许
+    app.handle_key(key(KeyCode::Char('n')));
+    assert_eq!(app.prompt, Prompt::None);
+    assert!(app.pending.is_none());
+    // Restore 预览同理
+    let mut app2 = App::new(
+        sample_apps(),
+        core::Manager::default(),
+        i18n::Catalog { chinese: false },
+    );
+    app2.terminal_small = true;
+    app2.prompt = Prompt::Restore;
+    app2.handle_key(key(KeyCode::Char('y')));
+    assert_eq!(app2.prompt, Prompt::Restore, "小终端不得执行恢复");
+}
+
+#[test]
+fn restore_cancel_variants_leave_no_dangling_state() {
+    let (dir, manager, cfg) = temp_env();
+    let change = manager.prepare(&cfg, Format::Git).unwrap();
+    manager.apply(&change).unwrap();
+    for cancel in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('N')] {
+        let mut app = app_with_source(manager.clone(), &cfg);
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(app.prompt, Prompt::Restore);
+        app.handle_key(key(cancel));
+        assert_eq!(app.prompt, Prompt::None, "{cancel:?} 必须取消恢复");
+        assert!(app.restore_snapshot.is_none());
+        assert!(app.pending.is_none());
+    }
+    let _ = dir;
+}
+
+#[test]
+fn restore_without_snapshot_reports_error() {
+    let (dir, manager, cfg) = temp_env();
+    // 从未应用过：无快照
+    let mut app = app_with_source(manager, &cfg);
+    app.handle_key(key(KeyCode::Right));
+    app.handle_key(key(KeyCode::Char('r')));
+    assert_eq!(app.prompt, Prompt::None, "无快照不得进入预览");
+    assert!(!app.status.is_empty(), "必须报告无快照");
+    let _ = dir;
+}
+
+#[test]
+fn restore_preview_uses_canonical_path_like_confirm() {
+    // symlink 且扫描时 resolved 缺失：预览与确认必须都命中同一快照键
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let real = home.join(".gitconfig.real");
+    std::fs::write(&real, b"[user]\nname = Ada\n").unwrap();
+    let link = home.join(".gitconfig");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let manager = core::Manager {
+        home: home.clone(),
+        config_root: dir.path().join("config"),
+        state_root: dir.path().join("state"),
+    };
+    let change = manager.prepare(&link, Format::Git).unwrap();
+    manager.apply(&change).unwrap();
+    let mut app = App::new(sample_apps(), manager, i18n::Catalog { chinese: false });
+    app.apps[0].sources[0].path = link.to_str().unwrap().into();
+    app.apps[0].sources[0].resolved = None; // 模拟扫描时 canonicalize 失败
+    app.apps[0].sources[0].exists = true;
+    app.handle_key(key(KeyCode::Right));
+    app.handle_key(key(KeyCode::Char('r')));
+    assert_eq!(
+        app.prompt,
+        Prompt::Restore,
+        "symlink 且 resolved 缺失时必须能预览快照"
+    );
+    app.handle_key(key(KeyCode::Char('y')));
+    assert_eq!(app.prompt, Prompt::Confirm);
+    assert!(app.pending.is_some());
+    let _ = app.manager.discard(&app.pending.take().unwrap());
+    let _ = dir;
+}
+
+#[test]
+fn error_detail_view_requires_error_status() {
+    let mut app = App::new(
+        sample_apps(),
+        core::Manager::default(),
+        i18n::Catalog { chinese: false },
+    );
+    app.handle_key(key(KeyCode::Char('d')));
+    assert!(!app.error_view, "无错误状态时 d 不得打开详情视图");
+    assert!(!app.status.is_empty(), "必须给出提示");
+}
+
+#[test]
+fn restore_shows_preview_then_confirm_diff() {
+    let (dir, manager, cfg) = temp_env();
+    // 先应用一次，创建快照
+    let change = manager.prepare(&cfg, Format::Git).unwrap();
+    manager.apply(&change).unwrap();
+    let mut app = app_with_source(manager, &cfg);
+    app.handle_key(key(KeyCode::Right)); // Sources
+    app.handle_key(key(KeyCode::Char('r')));
+    assert_eq!(
+        app.prompt,
+        Prompt::Restore,
+        "r 必须先展示快照预览而非直接进 diff"
+    );
+    assert!(app.restore_snapshot.is_some());
+    assert!(app.pending.is_none(), "预览阶段不得创建暂存");
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+    assert!(
+        text.contains("Restore snapshot"),
+        "必须显示快照预览:\n{text}"
+    );
+    assert!(text.contains("SHA-256"), "预览必须显示摘要:\n{text}");
+    assert!(text.contains("Source"), "预览必须显示来源:\n{text}");
+    // y 进入统一 diff 确认
+    app.handle_key(key(KeyCode::Char('y')));
+    assert_eq!(app.prompt, Prompt::Confirm);
+    assert!(app.pending.is_some());
+    assert!(app.restore_snapshot.is_none());
+    let _ = app.manager.discard(&app.pending.take().unwrap());
+    let _ = dir;
+}
+
+#[test]
+fn restore_preview_can_be_cancelled() {
+    let (dir, manager, cfg) = temp_env();
+    let change = manager.prepare(&cfg, Format::Git).unwrap();
+    manager.apply(&change).unwrap();
+    let mut app = app_with_source(manager, &cfg);
+    app.handle_key(key(KeyCode::Right));
+    app.handle_key(key(KeyCode::Char('r')));
+    assert_eq!(app.prompt, Prompt::Restore);
+    app.handle_key(key(KeyCode::Char('n')));
+    assert_eq!(app.prompt, Prompt::None);
+    assert!(app.restore_snapshot.is_none());
+    assert!(app.pending.is_none());
+    assert!(!app.status.is_empty(), "取消必须给出提示");
+    let _ = dir;
+}
+
+#[test]
+fn tiny_terminal_shows_resize_hint() {
+    let mut app = App::new(
+        sample_apps(),
+        core::Manager::default(),
+        i18n::Catalog { chinese: false },
+    );
+    let backend = ratatui::backend::TestBackend::new(30, 10);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+    assert!(
+        text.contains("Terminal too small") || text.contains("终端窗口过小"),
+        "小终端必须显示明确提示:\n{text}"
+    );
+    assert!(
+        text.contains("40x12") || text.contains("40×12"),
+        "最小尺寸信息不得被截断:\n{text}"
+    );
+}

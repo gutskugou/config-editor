@@ -10,6 +10,7 @@ pub enum Action {
     Set,
     Edit,
     Restore,
+    ShowError,
     Apply,
     Reject,
     PgUp,
@@ -33,6 +34,7 @@ pub fn normal_action(key: KeyEvent) -> Action {
         KeyCode::Char('s') => Action::Set,
         KeyCode::Char('e') => Action::Edit,
         KeyCode::Char('r') => Action::Restore,
+        KeyCode::Char('d') => Action::ShowError,
         _ => Action::None,
     }
 }
@@ -89,6 +91,7 @@ mod tests {
         assert_eq!(normal_action(m('s')), Action::Set);
         assert_eq!(normal_action(m('e')), Action::Edit);
         assert_eq!(normal_action(m('r')), Action::Restore);
+        assert_eq!(normal_action(m('d')), Action::ShowError);
         assert_eq!(normal_action(m('x')), Action::None);
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(normal_action(ctrl_c), Action::Quit);

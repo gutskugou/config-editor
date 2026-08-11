@@ -4,9 +4,9 @@ use crate::i18n::Catalog;
 use crate::parse::{parse_settings, relocate_setting, replace_setting};
 use crate::tui::keymap::{self, Action};
 use core::diff::simple_diff;
-use crossterm::event::{self, Event, KeyEvent};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn clamp_i(value: isize, min: usize, max: usize) -> isize {
     (value.max(min as isize)).min(max as isize)
@@ -25,6 +25,7 @@ pub enum Prompt {
     Search,
     Value,
     Confirm,
+    Restore,
 }
 
 pub struct App {
@@ -45,6 +46,10 @@ pub struct App {
     pub width: u16,
     pub height: u16,
     pub quit: bool,
+    pub error_view: bool,
+    pub error_offset: usize,
+    pub restore_snapshot: Option<core::snapshot::Snapshot>,
+    pub terminal_small: bool,
 }
 
 pub fn run_tui(apps: Vec<Application>, manager: Manager, lang: Catalog) -> Result<(), String> {
@@ -69,13 +74,7 @@ fn run_loop(
             .draw(|frame| app.render(frame))
             .map_err(|e| e.to_string())?;
         match event::read().map_err(|e| e.to_string())? {
-            Event::Key(k) => {
-                if app.prompt == Prompt::Confirm {
-                    app.handle_confirm(k);
-                } else {
-                    app.handle_key(k);
-                }
-            }
+            Event::Key(k) => app.handle_key(k),
             Event::Resize(w, h) => {
                 app.width = w;
                 app.height = h;
@@ -108,6 +107,10 @@ impl App {
             width: 80,
             height: 24,
             quit: false,
+            error_view: false,
+            error_offset: 0,
+            restore_snapshot: None,
+            terminal_small: false,
         }
     }
 
@@ -141,10 +144,48 @@ impl App {
         if self.quit {
             return;
         }
+        if self.error_view {
+            self.handle_error_view(key);
+            return;
+        }
+        // 小终端下 diff/恢复预览不可见：禁止破坏性确认，避免盲应用
+        if self.terminal_small
+            && matches!(self.prompt, Prompt::Confirm | Prompt::Restore)
+            && matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+        {
+            self.status = self
+                .lang
+                .text(
+                    "Terminal too small to review the change; enlarge and retry",
+                    "终端太小无法审阅更改；请放大后重试",
+                )
+                .into();
+            return;
+        }
         match self.prompt {
             Prompt::None => self.handle_normal(key),
             Prompt::Search | Prompt::Value => self.handle_text_input(key),
             Prompt::Confirm => self.handle_confirm(key),
+            Prompt::Restore => self.handle_restore(key),
+        }
+    }
+
+    /// 错误详情视图：↑↓/jk 滚动；Esc/Enter/q 关闭；Ctrl-C 退出；其余键忽略
+    fn handle_error_view(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.error_view = false;
+                self.error_offset = 0;
+                self.status.clear();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.error_offset = self.error_offset.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.error_offset = self.error_offset.saturating_add(1);
+            }
+            _ => {}
         }
     }
 
@@ -165,6 +206,16 @@ impl App {
                 }
             }
             Action::Restore => self.start_restore(),
+            Action::ShowError => {
+                if self.status.starts_with('!') && !self.status.is_empty() {
+                    self.error_view = true;
+                } else {
+                    self.status = self
+                        .lang
+                        .text("No error details to show", "没有可查看的错误详情")
+                        .into();
+                }
+            }
             _ => {}
         }
     }
@@ -382,14 +433,54 @@ impl App {
                 .into();
             return;
         }
-        let path = source.resolved.as_ref().unwrap_or(&source.path);
-        let change = match self.manager.prepare_restore(Path::new(path), source.format) {
-            Ok(c) => c,
+        // 预览与确认必须使用同一路径键：prepare_restore 内部以 canonicalize 后的
+        // 目标为准，这里同样先 canonicalize，避免 symlink 且 resolved 缺失时
+        // 预览报"无快照"而确认却成功的路径不一致
+        let raw = source.resolved.as_ref().unwrap_or(&source.path);
+        let path = std::fs::canonicalize(raw).unwrap_or_else(|_| PathBuf::from(raw.clone()));
+        let snapshot = match self.manager.latest(path.to_str().unwrap_or_default()) {
+            Ok(s) => s,
             Err(e) => {
                 self.status = format!("! {e}");
                 return;
             }
         };
+        // 预览阶段只读最新快照信息（时间/来源/摘要），不创建暂存；
+        // 确认后 prepare_restore 才做完整性校验并进入统一 diff 确认流程
+        self.restore_snapshot = Some(snapshot);
+        self.prompt = Prompt::Restore;
+    }
+
+    fn handle_restore(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_restore(),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
+                self.restore_snapshot = None;
+                self.prompt = Prompt::None;
+                self.status = self.lang.text("Restore cancelled", "已取消恢复").into();
+            }
+            _ => {}
+        }
+    }
+
+    fn confirm_restore(&mut self) {
+        let Some((_app, source, _)) = self.selection() else {
+            self.restore_snapshot = None;
+            self.prompt = Prompt::None;
+            return;
+        };
+        let path = source.resolved.as_ref().unwrap_or(&source.path);
+        let change = match self.manager.prepare_restore(Path::new(path), source.format) {
+            Ok(c) => c,
+            Err(e) => {
+                self.restore_snapshot = None;
+                self.prompt = Prompt::None;
+                self.status = format!("! {e}");
+                return;
+            }
+        };
+        self.restore_snapshot = None;
         let after = std::fs::read(&change.stage).unwrap_or_default();
         let before = std::fs::read(&change.target).unwrap_or_default();
         self.pending = Some(change);

@@ -13,7 +13,7 @@ use secure::{
     allowed, atomic_write, digest, identity, open_regular, secure_dir, validate_info, Identity,
 };
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Manager {
     pub home: PathBuf,
     pub config_root: PathBuf,

@@ -9,8 +9,23 @@ use ratatui::Frame;
 
 impl App {
     pub(crate) fn render(&mut self, frame: &mut Frame) {
+        if self.error_view {
+            self.render_error(frame, frame.area());
+            return;
+        }
+        let area = frame.area();
+        if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+            self.terminal_small = true;
+            self.render_small_terminal(frame, area);
+            return;
+        }
+        self.terminal_small = false;
         if self.prompt == Prompt::Confirm && !self.diff.is_empty() {
-            self.render_diff(frame, frame.area());
+            self.render_diff(frame, area);
+            return;
+        }
+        if self.prompt == Prompt::Restore {
+            self.render_restore(frame, area);
             return;
         }
         let areas = Layout::default()
@@ -50,7 +65,21 @@ impl App {
             truncate(heading, width),
             Style::default().fg(Color::DarkGray),
         )));
-        for (i, app) in apps.iter().enumerate() {
+        // 应用列表独立滚动视口：中部高度扣掉 sources/settings 分区与固定开销
+        // （1 标题 + 1 空行 + 1 描述 + 1 Sources 标题 + visible_sources + 1 Settings 标题 + 设置区最少 2 行）
+        let source_count = self.current_app().map(|a| a.sources.len()).unwrap_or(0);
+        let visible_sources = source_count.min(4);
+        let apps_visible = if apps.is_empty() {
+            0
+        } else {
+            apps.len().min(
+                (area.height as usize)
+                    .saturating_sub(7 + visible_sources)
+                    .max(1),
+            )
+        };
+        let app_start = visible_start(self.app_index, apps.len(), apps_visible);
+        for (i, app) in apps.iter().enumerate().skip(app_start).take(apps_visible) {
             let marker = if i == self.app_index && self.focus == Focus::Apps {
                 "> "
             } else {
@@ -101,8 +130,6 @@ impl App {
             )));
             // Sources 分区：标题 + source 行（高度 min(count,4)）+ 设置标题
             let source = self.current_source();
-            let source_count = app.sources.len();
-            let visible_sources = source_count.min(4);
             let src_start = visible_start(self.source_index, source_count, visible_sources);
             let heading1 = Span::styled(
                 truncate(
@@ -144,9 +171,9 @@ impl App {
                     Style::default().fg(Color::DarkGray),
                 );
                 lines.push(Line::from(heading2));
-                // 设置区可用高度：中部高度 - 头部(apps/desc) - sources 分区
+                // 设置区可用高度：中部高度 - 应用标题 - apps 视口 - 固定行 - sources 分区
                 let details = self.detail_lines(source, width);
-                let header = 1 + apps.len() + 2 + 2 + visible_sources;
+                let header = 1 + apps_visible + 2 + 2 + visible_sources;
                 let available = area.height.saturating_sub(header as u16) as usize;
                 let start =
                     visible_start(self.selected_detail_row(source), details.len(), available);
@@ -262,7 +289,10 @@ impl App {
             Style::default().fg(Color::DarkGray),
         )));
         for line in &all[offset..end] {
-            lines.push(Line::from(Span::raw(truncate(line, width))));
+            lines.push(Line::from(Span::styled(
+                truncate(line, width),
+                diff_style(line),
+            )));
         }
         lines.push(Line::from(
             self.lang
@@ -278,7 +308,140 @@ impl App {
         )));
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
     }
+    pub(crate) fn render_restore(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let width = area.width as usize;
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            truncate(self.lang.text("Restore snapshot", "恢复快照"), width),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(snap) = &self.restore_snapshot {
+            lines.push(Line::from(Span::raw(truncate(
+                &format!(
+                    "{}: {}",
+                    self.lang.text("Source", "来源"),
+                    snap.original_path
+                ),
+                width,
+            ))));
+            let local = snap.created_at.with_timezone(&chrono::Local);
+            lines.push(Line::from(Span::raw(truncate(
+                &format!(
+                    "{}: {}",
+                    self.lang.text("Created", "创建时间"),
+                    local.format("%Y-%m-%d %H:%M:%S")
+                ),
+                width,
+            ))));
+            let short_hash = snap.hash.get(..12).unwrap_or(&snap.hash);
+            lines.push(Line::from(Span::raw(truncate(
+                &format!("SHA-256: {short_hash}…",),
+                width,
+            ))));
+            let size = std::fs::metadata(&snap.content_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            lines.push(Line::from(Span::raw(truncate(
+                &format!("{}: {size} bytes", self.lang.text("Size", "大小")),
+                width,
+            ))));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            self.lang
+                .text("Restore this snapshot? [y/N]", "恢复此快照？[y/N]"),
+        ));
+        lines.push(Line::from(Span::styled(
+            truncate(
+                self.lang.text("y restore  n cancel", "y 恢复  n 取消"),
+                width,
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    }
+
+    pub(crate) fn render_error(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let width = area.width as usize;
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            truncate(self.lang.text("Error details", "错误详情"), width),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        let text = self.status.trim_end_matches('\n');
+        let lines_all: Vec<&str> = if text.is_empty() {
+            vec![]
+        } else {
+            text.split('\n').collect()
+        };
+        let page = area.height.saturating_sub(3).max(1) as usize;
+        let offset = self.error_offset.min(lines_all.len().saturating_sub(page));
+        let end = (offset + page).min(lines_all.len());
+        // 长行不预截断：交由 Paragraph wrap 折行，保证单行长错误完整可读
+        for line in &lines_all[offset..end] {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::Red),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            truncate(
+                self.lang
+                    .text("↑↓/jk scroll  Esc close", "↑↓/jk 滚动  Esc 关闭"),
+                width,
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    }
+
+    pub(crate) fn render_small_terminal(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let width = area.width as usize;
+        let lines = vec![
+            Line::from(Span::styled(
+                truncate(self.lang.text("Config Editor", "Config Editor"), width),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            // 拆成短行：窄终端下关键信息（最小尺寸）不得被截断
+            Line::from(Span::raw(truncate(
+                self.lang.text("Terminal too small", "终端窗口过小"),
+                width,
+            ))),
+            Line::from(Span::raw(truncate(
+                self.lang.text("min 40x12", "最小 40×12"),
+                width,
+            ))),
+        ];
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    }
 }
+
+/// unified diff 逐行样式：文件头 / hunk 定位 / 新增 / 删除 / 提示
+fn diff_style(line: &str) -> Style {
+    if line.starts_with("--- ") || line.starts_with("+++ ") {
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("@@") {
+        Style::default().fg(Color::Cyan)
+    } else if line.starts_with('+') {
+        Style::default().fg(Color::Green)
+    } else if line.starts_with('-') {
+        Style::default().fg(Color::Red)
+    } else if line.starts_with('(') {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    }
+}
+
+const MIN_TERMINAL_WIDTH: u16 = 40;
+const MIN_TERMINAL_HEIGHT: u16 = 12;
 
 fn truncate(s: &str, width: usize) -> String {
     use unicode_width::UnicodeWidthStr;

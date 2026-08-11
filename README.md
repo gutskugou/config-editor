@@ -16,9 +16,11 @@ Config Editor is a safety layer for personal Linux configuration files. It disco
 - Git、SSH、Starship、npm 和 pip 支持有限的逐行结构化编辑。
 - 所有已存在的配置文件都可以通过 `$VISUAL`/`$EDITOR` 编辑私有暂存副本。
 - Bash、Zsh、Fish、JSONC 和 TOML 在适用时执行语法检查。
-- 每次写入前展示可滚动 unified diff，并要求明确确认。
+- 每次写入前展示可滚动 unified diff（逐行着色），并要求明确确认。
+- 恢复前展示快照时间、来源与摘要；错误可查看完整详情；终端过小有明确提示。
 - 使用 SHA-256 并发检查、私有快照、同目录原子替换和恢复流程。
 - 根据 `LANG` 自动选择中文或英文 TUI。
+- 默认无联网遥测；诊断可通过 `doctor --json` 与 `report --output` 主动本地导出（不含配置内容、设置值与私人路径）。
 - 永不使用 `sudo`，拒绝写入用户 HOME/XDG 配置根目录之外的目标。
 
 ## 安装 / Installation
@@ -59,7 +61,9 @@ install -Dm755 target/release/config-editor ~/.local/bin/config-editor
 
 ```bash
 config-editor doctor       # 检查环境和可用工具
+config-editor doctor --json  # 机器可读诊断（路径已归一化）
 config-editor scan --json  # 输出发现结果，不修改文件
+config-editor report --output report.json  # 导出脱敏使用报告
 config-editor version      # 输出版本和构建信息
 config-editor              # 启动 TUI
 ```
@@ -68,12 +72,13 @@ TUI 快捷键：
 
 | Key | Action |
 |---|---|
-| `↑`/`↓`, `j`/`k` | 移动或滚动 Diff |
+| `↑`/`↓`, `j`/`k` | 移动或滚动（应用/配置源/设置/Diff/错误详情） |
 | `→`, `l`, `Enter` | 进入结构化设置 |
 | `←`, `h`, `Esc` | 返回应用列表 |
 | `s` | 修改选中的结构化值 |
 | `e` | 使用编辑器修改暂存副本 |
-| `r` | 准备恢复最新快照 |
+| `r` | 预览最新快照（时间/来源/摘要），`y`/`n` 确认后进入 Diff 审阅 |
+| `d` | 查看完整错误详情（`Esc` 关闭） |
 | `/` | 搜索应用 |
 | `y` / `n` | 应用或放弃待确认变更 |
 | `q` | 退出 |
